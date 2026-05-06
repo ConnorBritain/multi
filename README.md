@@ -128,13 +128,13 @@ Next paragraph...
 
 ## Feeding it to an LLM
 
-The whole `output/<video_id>/` directory is the artifact. Image paths in `paired.md` are relative to `paired.md`'s location, so the directory is portable.
+The whole `output/<video_id>/` directory is the artifact. Image paths in `paired.md` are relative to `paired.md`'s location, so the directory is portable — copy or zip it and it still works.
 
-**Claude Code:** `cd output/<video_id>` and start a session, then ask Claude to `Read paired.md`. Claude will load individual frames via `Read` when relevant.
+**Agentic coding CLIs** (Claude Code, Cursor, Aider, Codex CLI, etc.): point the agent at the directory and ask it to read `paired.md`. Any agent with a file-read + image-read tool will load the JPGs on demand when the visuals matter.
 
-**Anthropic API or other multimodal SDKs:** read `paired.json`, send `chunks[].text` as text content blocks and `chunks[].frames[].image` paths as image content blocks. The JSON is structured so you can chunk-by-chunk send transcript + frames together.
+**Direct multimodal API calls** (Anthropic, OpenAI, Google Gemini, local vision models via Ollama / llama.cpp / LM Studio, etc.): iterate `paired.json`'s `chunks[]`, sending each chunk's `text` as a text content block and `frames[].image` paths as image content blocks. The JSON is shaped so you can stream chunk-by-chunk to stay under context limits on long videos.
 
-**Quick eyeball:** open `paired.md` in any markdown viewer that renders relative-path images (VS Code preview works).
+**Quick human eyeball:** open `paired.md` in any markdown viewer that renders relative-path images (VS Code's preview works out of the box).
 
 ## Tuning the frame count
 

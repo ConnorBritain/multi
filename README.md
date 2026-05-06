@@ -28,7 +28,31 @@ uv sync
 
 ## Usage
 
-Drop a transcript file in `transcripts/<video_id>.txt` using this format (one block per timestamp, blank line between blocks):
+Just give it a URL. Captions are fetched from YouTube on the first run and cached in `transcripts/<video_id>.txt`.
+
+```powershell
+# scene-change mode (default) — content-driven, variable spacing
+uv run multi --url https://youtu.be/EcbgbKtOELY
+
+# fixed-interval mode — predictable spacing
+uv run multi --url https://youtu.be/EcbgbKtOELY --interval 2
+
+# every half second, no OCR (for dense sampling on long videos)
+uv run multi --url <URL> --interval 0.5 --no-ocr
+```
+
+Output lands in `output/<video_id>/` by default, or pass `--out <path>` to override.
+
+### Transcript handling
+
+On every run, `multi` looks for `transcripts/<video_id>.txt` (or whatever `--transcript` points at):
+
+- **File exists** → use it as-is.
+- **File missing** → fetch YouTube captions via `youtube-transcript-api`, aggregate cues into ~30s blocks (override with `--chunk-seconds`), and save to that path.
+
+This means re-runs are cached and you can hand-edit the transcript file between runs to fix bad auto-captions.
+
+If a video has no captions at all, you can supply your own:
 
 ```
 00:00:00
@@ -38,20 +62,7 @@ First paragraph of transcript text...
 Next paragraph...
 ```
 
-Then run:
-
-```powershell
-# scene-change mode (default) — content-driven, variable spacing
-uv run multi --url https://youtu.be/EcbgbKtOELY --transcript transcripts/EcbgbKtOELY.txt
-
-# fixed-interval mode — predictable spacing
-uv run multi --url https://youtu.be/EcbgbKtOELY --transcript transcripts/EcbgbKtOELY.txt --interval 2
-
-# every half second, no OCR (for very dense sampling on long videos)
-uv run multi --url <URL> --transcript <PATH> --interval 0.5 --no-ocr
-```
-
-Output lands in `output/<video_id>/` by default, or pass `--out <path>` to override.
+Drop that in `transcripts/<video_id>.txt` (or pass `--transcript <path>`) and `multi` will skip the fetch step.
 
 ## Two extraction modes
 
@@ -69,8 +80,10 @@ When `--interval` is set, scene detection is skipped entirely and `--threshold` 
 ## Flags
 
 - `--url URL` (required) — YouTube URL
-- `--transcript PATH` (required) — path to the timestamped `.txt` file
+- `--transcript PATH` — path to a transcript `.txt` (default: `transcripts/<video_id>.txt`, auto-fetched if missing)
 - `--out PATH` — output directory (default: `output/<video_id>`)
+- `--lang LANG` — caption language to try when auto-fetching; repeat for fallbacks (default: `en`, `en-US`, `en-GB`)
+- `--chunk-seconds FLOAT` — when auto-fetching, aggregate cues into ~N-second blocks (default `30`, `0` keeps raw per-cue granularity)
 - `--interval FLOAT` — grab a frame every N seconds (e.g. `0.5`, `1`, `2`, `5`); disables scene detection
 - `--threshold FLOAT` — PySceneDetect content threshold (default `27.0`, scene mode only)
 - `--min-scene-len FLOAT` — minimum scene length in seconds (default `1.5`, scene mode only)

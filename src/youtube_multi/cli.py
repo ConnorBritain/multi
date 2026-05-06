@@ -15,6 +15,12 @@ from PIL import Image
 from scenedetect import ContentDetector, SceneManager, open_video
 from scenedetect.scene_manager import save_images
 from yt_dlp import YoutubeDL
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import (
+    NoTranscriptFound,
+    TranscriptsDisabled,
+    VideoUnavailable,
+)
 
 
 _TESSERACT_FALLBACKS = [
@@ -184,6 +190,45 @@ def ocr_frame(image_path: Path, min_chars: int) -> str:
     return text if len(text) >= min_chars else ""
 
 
+def fetch_transcript_youtube(video_id: str, languages: list[str]) -> list[Chunk]:
+    api = YouTubeTranscriptApi()
+    fetched = api.fetch(video_id, languages=languages)
+    cues: list[Chunk] = []
+    for snippet in fetched.snippets:
+        text = re.sub(r"\s+", " ", snippet.text).strip()
+        if text:
+            cues.append(Chunk(start_seconds=round(snippet.start), text=text))
+    return cues
+
+
+def aggregate_cues(cues: list[Chunk], target_seconds: float) -> list[Chunk]:
+    if target_seconds <= 0 or not cues:
+        return cues
+    out: list[Chunk] = []
+    bucket_start = cues[0].start_seconds
+    bucket_text: list[str] = []
+    for c in cues:
+        if c.start_seconds - bucket_start >= target_seconds and bucket_text:
+            out.append(Chunk(start_seconds=bucket_start, text=" ".join(bucket_text)))
+            bucket_start = c.start_seconds
+            bucket_text = [c.text]
+        else:
+            bucket_text.append(c.text)
+    if bucket_text:
+        out.append(Chunk(start_seconds=bucket_start, text=" ".join(bucket_text)))
+    return out
+
+
+def write_transcript_file(chunks: list[Chunk], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for c in chunks:
+        lines.append(hms(c.start_seconds))
+        lines.append(c.text)
+        lines.append("")
+    path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
 _TS_RE = re.compile(r"^(\d{1,2}):(\d{2}):(\d{2})$")
 
 
@@ -284,8 +329,28 @@ def write_json(
 def main() -> int:
     ap = argparse.ArgumentParser(prog="multi", description=__doc__)
     ap.add_argument("--url", required=True, help="YouTube video URL")
-    ap.add_argument("--transcript", required=True, type=Path, help="Path to transcript .txt")
+    ap.add_argument(
+        "--transcript",
+        type=Path,
+        default=None,
+        help="Path to transcript .txt. If omitted, transcripts/<video_id>.txt is used "
+        "(auto-fetched from YouTube captions if missing).",
+    )
     ap.add_argument("--out", type=Path, help="Output dir (default: output/<video_id>)")
+    ap.add_argument(
+        "--lang",
+        action="append",
+        default=None,
+        help="Caption language(s) to try when auto-fetching, in priority order. "
+        "Repeat for multiple. Default: en, en-US, en-GB.",
+    )
+    ap.add_argument(
+        "--chunk-seconds",
+        type=float,
+        default=30.0,
+        help="When auto-fetching, aggregate cues into ~N-second blocks. "
+        "Set 0 to keep raw per-cue granularity (default: 30).",
+    )
     ap.add_argument(
         "--interval",
         type=float,
@@ -299,14 +364,31 @@ def main() -> int:
     ap.add_argument("--no-ocr", action="store_true", help="Skip OCR step")
     args = ap.parse_args()
 
-    if not args.transcript.is_file():
-        print(f"transcript not found: {args.transcript}", file=sys.stderr)
-        return 2
-
     video_id = extract_video_id(args.url)
     out_dir: Path = args.out or Path("output") / video_id
     frames_dir = out_dir / "frames"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    transcript_path: Path = args.transcript or Path("transcripts") / f"{video_id}.txt"
+    if not transcript_path.is_file():
+        languages = args.lang or ["en", "en-US", "en-GB"]
+        print(f"[0/5] fetching captions for {video_id} (langs={','.join(languages)})")
+        try:
+            cues = fetch_transcript_youtube(video_id, languages)
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            print(
+                f"\nNo YouTube captions available for {video_id} "
+                f"({type(e).__name__}). Provide a transcript file via --transcript "
+                f"or pick another --lang.",
+                file=sys.stderr,
+            )
+            return 3
+        except VideoUnavailable as e:
+            print(f"\nVideo unavailable: {e}", file=sys.stderr)
+            return 4
+        chunks_to_save = aggregate_cues(cues, args.chunk_seconds)
+        write_transcript_file(chunks_to_save, transcript_path)
+        print(f"      ->{len(cues)} cues, saved {len(chunks_to_save)} chunks to {transcript_path}")
 
     print(f"[1/5] downloading video ->{out_dir / 'video.mp4'}")
     video_path = download_video(args.url, out_dir)
@@ -327,8 +409,8 @@ def main() -> int:
         for scene in scenes:
             scene.ocr = ocr_frame(scene.image_path, args.ocr_min_chars)
 
-    print(f"[4/5] parsing transcript: {args.transcript}")
-    chunks = parse_transcript(args.transcript)
+    print(f"[4/5] parsing transcript: {transcript_path}")
+    chunks = parse_transcript(transcript_path)
     print(f"      ->{len(chunks)} chunks")
     pair_scenes(scenes, chunks)
 

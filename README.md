@@ -138,13 +138,13 @@ The whole `output/<video_id>/` directory is the artifact. Image paths in `paired
 
 ## Tuning the frame count
 
-Some rough numbers from a 9-minute UX/UI tutorial (`EcbgbKtOELY`):
+Rough numbers for a 9-minute video:
 
 | Mode | Frames |
 |---|---|
-| Scene-detect (defaults) | 81 |
+| Scene-detect (defaults) | ~80 |
 | `--interval 5` | ~110 |
-| `--interval 2` | 282 |
+| `--interval 2` | ~280 |
 | `--interval 1` | ~550 |
 | `--interval 0.5` | ~1100 |
 

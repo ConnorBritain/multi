@@ -7,20 +7,27 @@ Given a YouTube URL and a timestamped transcript file, `multi` produces a direct
 - `frames/` — JPGs captured either at scene-change moments or at a fixed time interval
 - `paired.md` — the transcript with image references interleaved at the right timestamps (and OCR'd text per frame)
 - `paired.json` — the same data in structured form
+- `manifest.json` — how this output was produced (CLI args, library and tool versions, video hash, timestamp)
 
 Designed for tutorial/lecture content where the visual and the spoken word need to be reasoned about together.
 
 ## Requirements
 
-- Windows 11 (paths are Windows-flavored; macOS/Linux work with minor tesseract path tweaks)
-- Python 3.13
-- [uv](https://docs.astral.sh/uv/)
-- ffmpeg — `winget install Gyan.FFmpeg`
-- Tesseract OCR — `winget install UB-Mannheim.TesseractOCR` (only needed if you don't pass `--no-ocr`)
+- Python 3.13 and [uv](https://docs.astral.sh/uv/)
+- ffmpeg
+- Tesseract OCR (only needed if you don't pass `--no-ocr`)
+
+| Platform | ffmpeg | Tesseract |
+|---|---|---|
+| Windows | `winget install Gyan.FFmpeg` | `winget install UB-Mannheim.TesseractOCR` |
+| macOS | `brew install ffmpeg` | `brew install tesseract` |
+| Debian/Ubuntu | `apt install ffmpeg` | `apt install tesseract-ocr` |
+
+Tesseract is found via `$TESSERACT_CMD`, then `PATH`, then the default install location for your platform.
 
 ## Install
 
-```powershell
+```sh
 git clone https://github.com/ConnorBritain/multi.git
 cd multi
 uv sync
@@ -30,7 +37,7 @@ uv sync
 
 Just give it a URL. Captions are fetched from YouTube on the first run and cached in `transcripts/<video_id>.txt`.
 
-```powershell
+```sh
 # scene-change mode (default) — content-driven, variable spacing
 uv run multi --url https://youtu.be/EcbgbKtOELY
 
@@ -100,7 +107,8 @@ output/<video_id>/
 │   ├── 0002_t00m02s.jpg
 │   └── ...
 ├── paired.md          # transcript with embedded ![](frames/...) references
-└── paired.json        # structured: { source_url, video_id, chunks: [{ start_seconds, text, frames: [...] }] }
+├── paired.json        # structured: { source_url, video_id, chunks: [{ start_seconds, text, frames: [...] }] }
+└── manifest.json      # run provenance: args, lib/tool versions, video sha256, created_at
 ```
 
 `paired.md` shape:
@@ -149,3 +157,24 @@ Rough numbers for a 9-minute video:
 | `--interval 0.5` | ~1100 |
 
 For LLM consumption, more frames = more tokens. Start with scene-detect or `--interval 5`; bump density only if the agent is missing visual context.
+
+## Development
+
+The code lives in `src/youtube_multi/`, one module per pipeline stage:
+
+| Module | Responsibility |
+|---|---|
+| `fetch.py` | video download, caption fetch, transcript file read/write |
+| `extract.py` | scene-change detection and fixed-interval frame grabs |
+| `enrich.py` | tesseract discovery, OCR |
+| `align.py` | pairing frames to transcript chunks |
+| `emit.py` | `paired.md`, `paired.json`, `manifest.json` writers |
+| `models.py` | `Scene`/`Chunk` dataclasses and time/URL helpers |
+| `cli.py` | argument parsing and orchestration |
+
+Tests need ffmpeg (to synthesize a short fixture video, so no network is required) and optionally tesseract; tests that need a missing tool skip themselves.
+
+```sh
+uv sync
+uv run pytest
+```

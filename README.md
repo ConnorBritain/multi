@@ -1,12 +1,13 @@
 # multi
 
-Pair a YouTube video's frames with its timestamped transcript so a multimodal LLM can *see* the visuals while reading the words.
+Turn a YouTube video into a curated context pack an LLM agent can navigate: deduplicated, classified frames paired with the timestamped transcript, plus the derived data an agent can't compute well on its own (frame diffs, frame kinds, OCR).
 
 Given a YouTube URL and a timestamped transcript file, `multi` produces a directory containing:
 
-- `frames/` — JPGs captured either at scene-change moments or at a fixed time interval
-- `paired.md` — the transcript with image references interleaved at the right timestamps (and OCR'd text per frame)
-- `paired.json` — the same data in structured form
+- `frames/` — JPGs captured either at scene-change moments or at a fixed time interval, with near-duplicates and talking-head shots removed
+- `frames/diffs/` — for consecutive frames of the same kind, a text diff of the OCR and a cropped image of the region that changed
+- `paired.md` — the transcript with image references interleaved at the right timestamps, each with its kind, visible time range, OCR text and diff summary
+- `paired.json` — the same data in structured form, plus the list of dropped frames and why
 - `manifest.json` — how this output was produced (CLI args, library and tool versions, video hash, timestamp)
 
 Designed for tutorial/lecture content where the visual and the spoken word need to be reasoned about together.
@@ -84,6 +85,16 @@ PySceneDetect's `ContentDetector` converts each frame to HSV, computes the avera
 
 When `--interval` is set, scene detection is skipped entirely and `--threshold` / `--min-scene-len` are ignored.
 
+## Dedupe, classify, drop, diff
+
+After extraction every frame goes through four cheap passes (no models, no network):
+
+1. **Dedupe.** Each frame gets a 64-bit perceptual hash (DCT pHash, computed with OpenCV). Consecutive frames whose hashes are within `--dedupe-distance` (default `6`) of the current survivor are dropped as duplicates; the survivor's `visible_from`/`visible_to` range is extended to cover them. `--no-dedupe` keeps everything. This is what makes `--interval` modes usable: a 1-second grab of a static slide collapses to one frame with a visible range.
+2. **OCR** runs only on surviving frames and now keeps line structure (`ocr_lines`) and mean word confidence (`ocr_confidence`) alongside the flat `ocr` string.
+3. **Classify.** Each frame is labelled `slide | code | terminal | diagram | talking-head | whiteboard | other` with a confidence in `[0, 1]`, from OCR character density, monospace/indent structure, code and shell-prompt tokens, Haar face detection, luminance/saturation stats, and line/box detection. It is a rule table, not a model: expect it to be right on the obvious cases and low-confidence on the rest.
+4. **Drop.** Frames whose kind is in `--drop` are removed. The default drops `talking-head`; pass `--drop none` to keep everything or `--drop talking-head --drop other` (or `--drop talking-head,other`) to drop more. Dropped files are deleted unless `--keep-dropped` moves them to `frames/dropped/`. Every dropped frame is still listed in `paired.json` under `dropped_frames` with its reason.
+5. **Diff.** For consecutive kept frames of the same kind, `frames/diffs/<prev>_<cur>.txt` is a unified diff of the OCR lines and `frames/diffs/<prev>_<cur>.jpg` is a crop of the region that changed (only written when the change covers less than 60% of the frame). `paired.md` summarises each diff under the frame; `paired.json` carries the paths, line counts, changed region and changed-pixel fraction.
+
 ## Flags
 
 - `--url URL` (required) — YouTube URL
@@ -95,7 +106,12 @@ When `--interval` is set, scene detection is skipped entirely and `--threshold` 
 - `--threshold FLOAT` — PySceneDetect content threshold (default `27.0`, scene mode only)
 - `--min-scene-len FLOAT` — minimum scene length in seconds (default `1.5`, scene mode only)
 - `--ocr-min-chars INT` — drop OCR results shorter than this (default `5`)
-- `--no-ocr` — skip OCR
+- `--no-ocr` — skip OCR (classification then relies on image features only)
+- `--dedupe-distance INT` — max pHash hamming distance for consecutive frames to count as duplicates (default `6`, `0` = exact only)
+- `--no-dedupe` — keep near-duplicate frames
+- `--drop KIND` — drop frames of this kind; repeatable or comma-separated (default `talking-head`; `none` keeps all)
+- `--keep-dropped` — move dropped frames to `frames/dropped/` instead of deleting them
+- `--no-diff` — skip OCR/pixel diffs between consecutive frames
 
 ## Output shape
 
@@ -103,11 +119,14 @@ When `--interval` is set, scene detection is skipped entirely and `--threshold` 
 output/<video_id>/
 ├── video.mp4          # downloaded source (gitignored)
 ├── frames/
-│   ├── 0001_t00m00s.jpg
-│   ├── 0002_t00m02s.jpg
-│   └── ...
+│   ├── 0001_t00m00s.jpg   # kept frames only; idx gaps are dropped frames
+│   ├── 0004_t00m03s.jpg
+│   ├── diffs/
+│   │   ├── 0001_0004.txt  # unified diff of OCR lines
+│   │   └── 0001_0004.jpg  # crop of the changed region
+│   └── dropped/           # only with --keep-dropped
 ├── paired.md          # transcript with embedded ![](frames/...) references
-├── paired.json        # structured: { source_url, video_id, chunks: [{ start_seconds, text, frames: [...] }] }
+├── paired.json        # structured, see below
 └── manifest.json      # run provenance: args, lib/tool versions, video sha256, created_at
 ```
 
@@ -125,13 +144,37 @@ Source: https://youtu.be/...
 First paragraph of the transcript...
 
 ![scene 0001 @ 00:00:00](frames/0001_t00m00s.jpg)
+> kind: slide (0.81) · visible 00:00:00–00:00:12
 > OCR: extracted text from the slide
 
-![scene 0002 @ 00:00:02](frames/0002_t00m02s.jpg)
+![scene 0004 @ 00:00:12](frames/0004_t00m12s.jpg)
+> kind: slide (0.77) · visible 00:00:12–00:00:31
+> OCR: extracted text from the next slide
+> diff vs 0001: +3 −1 lines, 14% of pixels changed (frames/diffs/0001_0004.txt, frames/diffs/0001_0004.jpg)
 
 ## 00:00:27
 
 Next paragraph...
+```
+
+`paired.json` shape (fields from the original release are unchanged; new ones are additive):
+
+```jsonc
+{
+  "source_url": "...", "video_id": "...", "manifest": "manifest.json",
+  "frame_stats": { "extracted": 80, "duplicates": 22, "dropped_by_kind": { "talking-head": 9 }, "kept": 49, "kept_by_kind": { "slide": 40, "code": 9 } },
+  "chunks": [{
+    "start_seconds": 0, "start_hms": "00:00:00", "text": "...",
+    "frames": [{
+      "idx": 1, "t_seconds": 0.0, "image": "frames/0001_t00m00s.jpg", "ocr": "...",
+      "ocr_lines": ["..."], "ocr_confidence": 91.3,
+      "kind": "slide", "kind_confidence": 0.81, "phash": "ebd1940e6bf1940e",
+      "visible_from": 0.0, "visible_to": 12.0,
+      "diff": null | { "vs": 1, "text": "frames/diffs/0001_0004.txt", "image": "frames/diffs/0001_0004.jpg", "added": 3, "removed": 1, "changed_region": [x, y, w, h], "changed_frac": 0.14 }
+    }]
+  }],
+  "dropped_frames": [{ "idx": 2, "t_seconds": 1.0, "reason": "duplicate", "duplicate_of": 1, "kind": "other", "image": null }]
+}
 ```
 
 ## Feeding it to an LLM
@@ -146,9 +189,9 @@ The whole `output/<video_id>/` directory is the artifact. Image paths in `paired
 
 ## Tuning the frame count
 
-Rough numbers for a 9-minute video:
+Rough numbers for a 9-minute video, before dedupe/drop:
 
-| Mode | Frames |
+| Mode | Frames extracted |
 |---|---|
 | Scene-detect (defaults) | ~80 |
 | `--interval 5` | ~110 |
@@ -156,7 +199,9 @@ Rough numbers for a 9-minute video:
 | `--interval 1` | ~550 |
 | `--interval 0.5` | ~1100 |
 
-For LLM consumption, more frames = more tokens. Start with scene-detect or `--interval 5`; bump density only if the agent is missing visual context.
+Dedupe and the default `--drop talking-head` then remove whatever is visually redundant, so the kept count depends on the content, not the mode. `frame_stats` in `paired.json` reports extracted / duplicates / dropped-by-kind / kept for each run. As a rule of thumb a 1280×720 frame costs an LLM roughly 1,200 tokens (about width × height / 750), so every dropped frame is a real saving.
+
+Start with scene-detect or `--interval 5`; bump density only if the agent is missing visual context. Dense intervals are far cheaper than they used to be because static stretches collapse to a single frame with a visible range.
 
 ## Development
 
@@ -166,7 +211,7 @@ The code lives in `src/youtube_multi/`, one module per pipeline stage:
 |---|---|
 | `fetch.py` | video download, caption fetch, transcript file read/write |
 | `extract.py` | scene-change detection and fixed-interval frame grabs |
-| `enrich.py` | tesseract discovery, OCR |
+| `enrich.py` | tesseract discovery, OCR, pHash dedupe, kind classification, diffs |
 | `align.py` | pairing frames to transcript chunks |
 | `emit.py` | `paired.md`, `paired.json`, `manifest.json` writers |
 | `models.py` | `Scene`/`Chunk` dataclasses and time/URL helpers |

@@ -64,6 +64,18 @@ def detect_scenes(
     return scenes
 
 
+def video_duration(video_path: Path) -> float:
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        if not cap.isOpened():
+            return 0.0
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        return total / fps if fps > 0 else 0.0
+    finally:
+        cap.release()
+
+
 def extract_interval_frames(
     video_path: Path,
     frames_dir: Path,

@@ -39,9 +39,11 @@ from .fetch import (
     write_transcript_file,
 )
 from .models import KINDS, Chunk, Cue, extract_video_id
+from .entities import build_glossary, write_entities
 from .navigate import assign_tiers, build_chapters, estimate_image_tokens, estimate_text_tokens, populate_chapters, score_frames
+from .reconstruct import reconstruct_all
 
-STEPS = 8
+STEPS = 9
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -123,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Image-token budget: frames are scored (novelty, OCR density, chunk coverage) and tiered so that "
         "tier 1 fits in TOKENS, tier 2 in 2×TOKENS, the rest is tier 3. Without it every frame is tier 1.",
     )
+    # Phase 4: reconstruction + entities
+    ap.add_argument("--no-reconstruct", action="store_true", help="Skip reconstructed/ (code files and commands.sh from code/terminal frames)")
+    ap.add_argument("--no-entities", action="store_true", help="Skip entities.md/json")
     return ap
 
 
@@ -251,18 +256,27 @@ def main(argv: list[str] | None = None) -> int:
     print(f"      ->{len(chapters)} chapters ({chapters[0].source if chapters else 'none'}); "
           f"frames by tier {budget_info['frames_by_tier']}; image tokens by tier {budget_info['tokens_by_tier']}")
 
+    print(f"[9/{STEPS}] reconstruction + entities")
+    reconstructed = [] if args.no_reconstruct else reconstruct_all(kept, out_dir / "reconstructed")
+    entities = [] if args.no_entities else build_glossary(chunks, cues, kept)
+    if not args.no_entities:
+        write_entities(entities, out_dir, video_id)
+    print(f"      ->{len(reconstructed)} reconstructed file(s), {len(entities)} entities")
+
     md_path = out_dir / "paired.md"
     json_path = out_dir / "paired.json"
     manifest_path = out_dir / "manifest.json"
     print(f"      writing {md_path.name}, {json_path.name}, index.md, index.json, SKILL.md, {manifest_path.name}")
     write_markdown(chunks, md_path, args.url, video_id)
     write_json(chunks, json_path, args.url, video_id, all_scenes=scenes, cues=cues,
-               metadata=metadata, chapters=chapters, budget_info=budget_info)
+               metadata=metadata, chapters=chapters, budget_info=budget_info,
+               reconstructed=reconstructed, entities_written=not args.no_entities)
     write_index(chapters, chunks, scenes, out_dir=out_dir, video_id=video_id, source_url=args.url,
                 metadata=metadata, duration=duration, budget_info=budget_info)
     write_skill(out_dir=out_dir, video_id=video_id, source_url=args.url, metadata=metadata, chapters=chapters,
                 all_scenes=scenes, chunks=chunks, budget_info=budget_info,
-                has_diffs=any(s.diff is not None for s in kept))
+                has_diffs=any(s.diff is not None for s in kept),
+                reconstructed=reconstructed, n_entities=len(entities) if not args.no_entities else None)
     write_manifest(
         build_manifest(
             args=vars(args),

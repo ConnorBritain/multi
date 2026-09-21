@@ -55,6 +55,10 @@ def _assert_schema_compat(data: dict, md: str) -> None:
     for f in (f for c in data["chunks"] for f in c["frames"]):
         assert f["tokens_est"] > 0 and 0.0 <= f["score"] <= 1.0 and f["tier"] in (1, 2, 3)
         assert f["width"] > 0 and f["height"] > 0
+        assert isinstance(f["reconstructed"], list)
+    # Phase 4: entities + reconstruction are always present in the schema
+    assert isinstance(data["reconstructed"], list)
+    assert data["entities"] == "entities.json"
 
 
 def _check_index(out: Path, data: dict) -> dict:
@@ -78,6 +82,17 @@ def _check_index(out: Path, data: dict) -> dict:
     skill = (out / "SKILL.md").read_text(encoding="utf-8")
     assert skill.startswith("---\nname: video-context-pack-AAAAAAAAAAA\n")
     assert "## Recommended reading order" in skill
+    entities = json.loads((out / "entities.json").read_text(encoding="utf-8"))
+    assert isinstance(entities, list)
+    for e in entities:
+        assert e["type"] in ("identifier", "command", "url", "path", "product")
+        for idx in e["frames"]:
+            assert idx in paired_frames
+    assert (out / "entities.md").read_text(encoding="utf-8").startswith("# Entities")
+    for r in data["reconstructed"]:
+        assert (out / r["path"]).is_file()
+        for idx in r["frames"]:
+            assert idx in paired_frames
     return index
 
 
@@ -172,6 +187,47 @@ def test_budget_tiers_and_metadata_chapters(fixture_video: Path, fixture_transcr
     assert index["tokens"]["tier1"] == index["tokens"]["text"] + index["budget"]["tokens_by_tier"]["1"]
     skill = (out / "SKILL.md").read_text(encoding="utf-8")
     assert "Fixture Video" in skill and "budget of 250" in skill
+
+
+def test_reconstruction_from_synthetic_code_frames(fixture_video: Path, fixture_transcript: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the fixture's frames to be classified as code/terminal with canned OCR so
+    the reconstruction + entity path is exercised end to end without tesseract."""
+    from youtube_multi import cli as cli_mod
+
+    canned = {
+        1: ("code", ["app.py", "import os", "def main():", "    return 0"]),
+        4: ("code", ["app.py", "import os", "def main():", "    print('hi')", "    return 0"]),
+        7: ("terminal", ["$ uv run app.py", "hi"]),
+        10: ("slide", ["Thanks for watching"]),
+    }
+
+    def fake_ocr(scene, min_chars):
+        kind, lines = canned.get(scene.idx, ("other", []))
+        scene.ocr_lines, scene.ocr, scene.ocr_confidence = lines, " ".join(lines), 88.0
+
+    def fake_classify(scene):
+        scene.kind, scene.kind_confidence = canned.get(scene.idx, ("other", []))[0], 0.9
+
+    monkeypatch.setattr(cli_mod, "configure_tesseract", lambda: None)
+    monkeypatch.setattr(cli_mod, "ocr_scene", fake_ocr)
+    monkeypatch.setattr(cli_mod, "classify_scene", fake_classify)
+    out = tmp_path / "out"
+    data = _run(fixture_video, fixture_transcript, out, "--interval", "1", "--no-metadata")
+    _check_index(out, data)
+    recon = {r["path"]: r for r in data["reconstructed"]}
+    assert set(recon) == {"reconstructed/app.py", "reconstructed/commands.sh"}
+    assert recon["reconstructed/app.py"]["frames"] == [1, 4] and recon["reconstructed/app.py"]["filename_source"] == "ocr"
+    app = (out / "reconstructed" / "app.py").read_text(encoding="utf-8")
+    assert "print('hi')" in app and "def main():" in app
+    assert "uv run app.py" in (out / "reconstructed" / "commands.sh").read_text(encoding="utf-8")
+    assert (out / "reconstructed" / "README.md").is_file()
+    frames = {f["idx"]: f for c in data["chunks"] for f in c["frames"]}
+    assert frames[1]["reconstructed"] == ["reconstructed/app.py"] and frames[7]["reconstructed"] == ["reconstructed/commands.sh"]
+    assert frames[10]["reconstructed"] == []
+    entities = {(e["name"], e["type"]): e for e in json.loads((out / "entities.json").read_text(encoding="utf-8"))}
+    assert entities[("uv run app.py", "command")]["first_frame"] == 7
+    skill = (out / "SKILL.md").read_text(encoding="utf-8")
+    assert "app.py from 2 frame(s)" in skill
 
 
 def test_bad_drop_kind_exits_2(fixture_transcript: Path, tmp_path: Path) -> None:

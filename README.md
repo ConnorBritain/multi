@@ -10,6 +10,8 @@ Given a YouTube URL and a timestamped transcript file, `multi` produces a direct
 - `frames/diffs/` — for consecutive frames of the same kind, a text diff of the OCR and a cropped image of the region that changed
 - `paired.md` — the transcript with image references interleaved after the sentence they appeared during, each with its kind, visible time range, OCR text, deep link and diff summary
 - `paired.json` — the same data in structured form, plus raw caption cues, chapters, dropped frames and why
+- `reconstructed/` — best-effort text folded from code and terminal frames: one file per filename seen in the OCR (or `unknown_N.<ext>`), `commands.sh` for shell commands, with per-line uncertainty markers and a README of confidences
+- `entities.md` / `entities.json` — identifiers, commands, URLs, paths and product names from OCR and transcript, each with the time it was first spoken and first shown on screen
 - `manifest.json` — how this output was produced (CLI args, library and tool versions, video hash, timestamp)
 - `metadata.json` — cached yt-dlp metadata (title, description, chapters)
 
@@ -126,6 +128,8 @@ After extraction every frame goes through four cheap passes (no models, no netwo
 - `--no-fetch-cues` — never contact YouTube for raw cues when the transcript file already exists
 - `--no-metadata` — skip the yt-dlp metadata fetch (title/description/chapters); chapters are then synthesized
 - `--budget TOKENS` — image-token budget for tiering: tier 1 fits in `TOKENS`, tier 2 in `2×TOKENS`, the rest is tier 3
+- `--no-reconstruct` — skip `reconstructed/`
+- `--no-entities` — skip `entities.md` / `entities.json`
 
 ## Output shape
 
@@ -135,6 +139,13 @@ output/<video_id>/
 ├── index.md           # chapters → frames table with tiers and token estimates
 ├── index.json         # same, structured
 ├── metadata.json      # yt-dlp title/description/chapters (cached)
+├── entities.md        # glossary with first-spoken / first-on-screen links
+├── entities.json
+├── reconstructed/
+│   ├── README.md      # per-file frames, confidence, uncertain lines
+│   ├── app.py         # folded from code frames that showed "app.py"
+│   ├── unknown_1.js   # filename not visible; language guessed
+│   └── commands.sh    # prompt lines from terminal frames, timestamped
 ├── video.mp4          # downloaded source (gitignored)
 ├── frames/
 │   ├── 0001_t00m00s.jpg   # kept frames only; idx gaps are dropped frames
@@ -186,7 +197,8 @@ Next paragraph...
 ```jsonc
 {
   "source_url": "...", "video_id": "...", "title": "...", "description": "...", "duration": 540, "channel": "...",
-  "manifest": "manifest.json", "index": "index.json", "skill": "SKILL.md",
+  "manifest": "manifest.json", "index": "index.json", "skill": "SKILL.md", "entities": "entities.json",
+  "reconstructed": [{ "path": "reconstructed/app.py", "kind": "code", "frames": [12, 15, 18], "lines": 41, "confidence": 0.87, "uncertain_lines": [9, 30], "filename_source": "ocr" }],
   "budget": { "budget": 20000, "tokens_by_tier": { "1": 19660, "2": 18400, "3": 22100 }, "frames_by_tier": { "1": 16, "2": 15, "3": 18 } },
   "chapters": [{ "index": 0, "title": "Intro", "start": 0, "end": 95, "url": "...", "source": "youtube", "chunk_ids": [0, 1, 2], "chunk_starts": [0, 30, 60], "frame_ids": [1, 4, 9], "tokens": { "text": 410, "images": 3687, "total": 4097 }, "tokens_tier1": 1639 }],
   "frame_stats": { "extracted": 80, "duplicates": 22, "dropped_by_kind": { "talking-head": 9 }, "kept": 49, "kept_by_kind": { "slide": 40, "code": 9 } },
@@ -200,7 +212,7 @@ Next paragraph...
       "kind": "slide", "kind_confidence": 0.81, "phash": "ebd1940e6bf1940e",
       "visible_from": 5.0, "visible_to": 12.0,
       "sentence_index": 1, "cue_ids_visible": [1, 2],
-      "width": 1280, "height": 720, "tokens_est": 1260, "score": 0.74, "tier": 1,
+      "width": 1280, "height": 720, "tokens_est": 1260, "score": 0.74, "tier": 1, "reconstructed": ["reconstructed/app.py"],
       "diff": null | { "vs": 1, "text": "frames/diffs/0001_0004.txt", "image": "frames/diffs/0001_0004.jpg", "added": 3, "removed": 1, "changed_region": [x, y, w, h], "changed_frac": 0.14 }
     }]
   }],
@@ -220,6 +232,14 @@ The pack is meant to be read progressively rather than linearly:
 **Token estimates** are deliberately rough: text ≈ characters / 4, images ≈ width × height / 750 (capped at 1,600), which tracks how most vision APIs price a 720p frame. Use them for relative decisions, not billing.
 
 **`--budget TOKENS`** scores every kept frame (`score` = 0.5 × visual novelty vs. the previous frame + 0.3 × OCR density + 0.2 × chunk coverage, where the best frame in each chunk gets the coverage bonus so no chunk goes unrepresented) and assigns `tier` greedily by score: tier 1 until the cumulative image tokens exceed `TOKENS`, tier 2 until `2 × TOKENS`, tier 3 after. A caller includes tier 1 first and escalates. Without `--budget`, scores are still emitted and every frame is tier 1.
+
+## Reconstruction and cross-reference
+
+**`reconstructed/`.** Consecutive kept `code` frames are grouped into runs; a run's filename comes from an editor tab or title bar seen in the OCR (`app.py`, `src/routes.ts` → `routes.ts`), otherwise the language is guessed from token patterns and the file is named `unknown_N.<ext>`. Each run's OCR snapshots are folded into one buffer with `difflib`: the later snapshot wins on changed lines, lines that vanish from the middle count as deletions, lines that vanish at the top or bottom count as scrolling and are kept. The output file starts with a comment naming the contributing frames and the mean OCR confidence; lines that appeared in only one of three or more snapshots, or came from a low-confidence frame, carry a trailing `??` marker (in the language's comment syntax; JSON gets no inline markers). `terminal` frames contribute to `commands.sh`: every prompt-prefixed line becomes a command, preceded by `# t=HH:MM:SS frame NNNN confidence=0.xx`, and low-confidence commands are commented out with `# ??`. `reconstructed/README.md` tabulates all of it. In `paired.json`, `reconstructed[]` lists the files and each frame's `reconstructed` field names the files it fed. This is best-effort by design: it will get indentation, quotes and look-alike glyphs wrong sometimes, and it says so.
+
+**`entities.md` / `entities.json`.** A glossary of `identifier` (snake_case, camelCase, PascalCase, dotted paths), `command` (prompt lines on screen; `npm|pip|uv|git|docker|…` verbs in speech), `url`, `path` and `product` (capitalised names seen at least twice, excluding sentence starts and stopwords). Each entry has `mentions`, `first_spoken` (from the raw cue timeline), `first_on_screen` with the frame index, the list of frames it appears in, and deep links for both first times. Sorted by first appearance.
+
+`--no-reconstruct` and `--no-entities` skip either step.
 
 ## Feeding it to an LLM
 
@@ -258,6 +278,8 @@ The code lives in `src/youtube_multi/`, one module per pipeline stage:
 | `enrich.py` | tesseract discovery, OCR, pHash dedupe, kind classification, diffs |
 | `align.py` | pairing frames to chunks, sentence splitting/timing, cue overlap |
 | `navigate.py` | chapters, token estimates, frame scoring and budget tiers |
+| `reconstruct.py` | folding code/terminal OCR into `reconstructed/` files and `commands.sh` |
+| `entities.py` | the entity glossary (`entities.md/json`) |
 | `emit.py` | `paired.md`, `paired.json`, `index.md/json`, `SKILL.md`, `manifest.json` writers |
 | `models.py` | `Scene`/`Chunk` dataclasses and time/URL helpers |
 | `cli.py` | argument parsing and orchestration |
@@ -268,3 +290,5 @@ Tests need ffmpeg (to synthesize a short fixture video, so no network is require
 uv sync
 uv run pytest
 ```
+
+Where this is going (local recordings, Whisper fallback, serving a pack as an MCP server): see [docs/roadmap.md](docs/roadmap.md).

@@ -14,6 +14,7 @@ from typing import Any
 
 from .models import Chunk, Cue, Scene, deep_link, hms
 from .navigate import Chapter, chapter_json, estimate_text_tokens
+from .reconstruct import Reconstructed
 
 
 def _rel(path: Path | None, out_dir: Path) -> str | None:
@@ -164,11 +165,17 @@ def write_json(
     metadata: dict[str, Any] | None = None,
     chapters: list[Chapter] | None = None,
     budget_info: dict[str, Any] | None = None,
+    reconstructed: list[Reconstructed] | None = None,
+    entities_written: bool = False,
 ) -> None:
     out_dir = out_path.parent
     all_scenes = all_scenes if all_scenes is not None else [s for c in chunks for s in c.scenes]
     cues = cues if cues is not None else [cue for c in chunks for cue in c.cues]
     metadata = metadata or {}
+    frame_to_recon: dict[int, list[str]] = {}
+    for r in reconstructed or []:
+        for idx in r.frame_idxs:
+            frame_to_recon.setdefault(idx, []).append(_rel(r.path, out_dir) or r.path.name)
     payload: dict[str, Any] = {
         "source_url": source_url,
         "video_id": video_id,
@@ -179,6 +186,19 @@ def write_json(
         "manifest": "manifest.json",
         "index": "index.json",
         "skill": "SKILL.md",
+        "entities": "entities.json" if entities_written else None,
+        "reconstructed": [
+            {
+                "path": _rel(r.path, out_dir),
+                "kind": r.kind,
+                "frames": r.frame_idxs,
+                "lines": r.n_lines,
+                "confidence": r.confidence,
+                "uncertain_lines": r.uncertain_lines,
+                "filename_source": r.filename_source,
+            }
+            for r in (reconstructed or [])
+        ],
         "budget": budget_info or {"budget": None},
         "chapters": [
             {k: v for k, v in chapter_json(ch, chunks, video_id, deep_link).items() if k != "visual_states"}
@@ -196,7 +216,10 @@ def write_json(
                     for s in c.sentences
                 ],
                 "cue_ids": [cue.id for cue in c.cues],
-                "frames": [_frame_json(s, out_dir, video_id) for s in c.scenes],
+                "frames": [
+                    {**_frame_json(s, out_dir, video_id), "reconstructed": frame_to_recon.get(s.idx, [])}
+                    for s in c.scenes
+                ],
             }
             for c in chunks
         ],
@@ -341,9 +364,22 @@ def write_skill(
     chunks: list[Chunk],
     budget_info: dict[str, Any],
     has_diffs: bool,
+    reconstructed: list[Reconstructed] | None = None,
+    n_entities: int | None = None,
 ) -> None:
     metadata = metadata or {}
     title = metadata.get("title") or video_id
+    reconstructed = reconstructed or []
+    recon_line = (
+        f"- Reconstructed text: {len(reconstructed)} file(s) in reconstructed/ ("
+        + ", ".join(f"{r.path.name} from {len(r.frame_idxs)} frame(s), confidence {r.confidence:.2f}" for r in reconstructed)
+        + ")"
+        if reconstructed
+        else "- Reconstructed text: none (no code/terminal frames with OCR text)"
+    )
+    entities_line = (
+        f"- Entities: {n_entities} in entities.md / entities.json" if n_entities is not None else "- Entities: not generated"
+    )
     stats = frame_stats(all_scenes)
     kept = [s for s in all_scenes if s.kept]
     image_tokens = sum(s.tokens_est for s in kept)
@@ -376,6 +412,8 @@ manifest.json   how this pack was produced (args, versions, video hash)
 metadata.json   raw yt-dlp metadata (title, description, chapters) when it could be fetched
 frames/         kept frames only: NNNN_tMMmSSs.jpg (NNNN = extraction index; gaps are dropped frames)
 frames/diffs/   for consecutive frames of the same kind: <a>_<b>.txt (OCR line diff) and <a>_<b>.jpg (crop of the changed region)
+reconstructed/  best-effort text folded from code/terminal frames: <filename> per file seen, commands.sh, README.md with confidences
+entities.md/json identifiers, commands, URLs, paths and product names with first-spoken / first-on-screen times
 ```
 
 ## Recommended reading order
@@ -389,7 +427,13 @@ frames/diffs/   for consecutive frames of the same kind: <a>_<b>.txt (OCR line d
    and 3 only if the answer still depends on the visual. {budget_line}
 4. **frames/diffs/** — when two consecutive frames are the same kind (e.g. a code file being edited), read
    the `.txt` diff instead of both images; the `.jpg` is just the changed region.
-5. **paired.json / index.json** — for programmatic access (exact seconds, cue ids, hashes, scores).
+5. **reconstructed/** — for code walkthroughs, read the reconstructed file instead of squinting at frames; lines
+   marked `??` appeared in only one frame or had low OCR confidence. `commands.sh` lists terminal commands with the
+   time and frame they were seen (never run it blindly). Each frame's `reconstructed` field in paired.json names
+   the files it contributed to.
+6. **entities.md** — to find where something was first mentioned or shown (an identifier, a command, a URL, a
+   product), look it up here and follow the deep link.
+7. **paired.json / index.json** — for programmatic access (exact seconds, cue ids, hashes, scores).
 
 ## Field reference
 
@@ -415,10 +459,13 @@ frames/diffs/   for consecutive frames of the same kind: <a>_<b>.txt (OCR line d
 - Frames: {stats['kept']} kept of {stats['extracted']} extracted ({stats['duplicates']} duplicates, {sum(stats['dropped_by_kind'].values())} dropped by kind); kept kinds: {kinds}
 - Estimated tokens: transcript ≈{text_tokens:,}, all kept images ≈{image_tokens:,}, tier-1 images ≈{tier1:,}
 - Diffs: {'present in frames/diffs/' if has_diffs else 'none'}
+{recon_line}
+{entities_line}
 
 ## Caveats
 
 - Classification and OCR are heuristic, offline and cheap; verify anything load-bearing against the image.
+- Reconstructed code is folded from OCR snapshots: indentation, quotes and similar-looking glyphs (0/O, l/1) may be wrong.
 - Sentence timing is interpolated from caption cues; it is accurate to a few seconds, not to the word.
 - Frame indices are not contiguous; that is expected.
 """

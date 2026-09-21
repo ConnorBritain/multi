@@ -12,7 +12,7 @@ from youtube_transcript_api._errors import (
 )
 
 from .align import align
-from .emit import build_manifest, frame_stats, write_json, write_manifest, write_markdown
+from .emit import build_manifest, frame_stats, write_index, write_json, write_manifest, write_markdown, write_skill
 from .enrich import (
     classify_scene,
     configure_tesseract,
@@ -31,6 +31,7 @@ from .fetch import (
     cues_to_chunks,
     download_video,
     fetch_cues_youtube,
+    fetch_metadata,
     parse_transcript,
     read_cues_file,
     synthesize_cues,
@@ -38,8 +39,9 @@ from .fetch import (
     write_transcript_file,
 )
 from .models import KINDS, Chunk, Cue, extract_video_id
+from .navigate import assign_tiers, build_chapters, estimate_image_tokens, estimate_text_tokens, populate_chapters, score_frames
 
-STEPS = 7
+STEPS = 8
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +109,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Never contact YouTube for raw caption cues when the transcript file already exists "
         "(sentence timing then interpolates across each chunk).",
     )
+    # Phase 3: navigation
+    ap.add_argument(
+        "--no-metadata",
+        action="store_true",
+        help="Skip fetching title/description/chapters via yt-dlp (chapters are then synthesized)",
+    )
+    ap.add_argument(
+        "--budget",
+        type=int,
+        default=None,
+        metavar="TOKENS",
+        help="Image-token budget: frames are scored (novelty, OCR density, chunk coverage) and tiered so that "
+        "tier 1 fits in TOKENS, tier 2 in 2×TOKENS, the rest is tier 3. Without it every frame is tier 1.",
+    )
     return ap
 
 
@@ -170,6 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[1/{STEPS}] downloading video ->{out_dir / 'video.mp4'}")
     video_path = download_video(args.url, out_dir)
     duration = video_duration(video_path)
+    metadata = None
+    if not args.no_metadata:
+        metadata = fetch_metadata(args.url, out_dir / "metadata.json")
+        if metadata is None:
+            print("  [warn] could not fetch metadata; chapters will be synthesized", file=sys.stderr)
+        else:
+            n_ch = len(metadata.get("chapters") or [])
+            print(f"      metadata: {metadata.get('title')!r}, {n_ch} chapters")
 
     if args.interval is not None:
         print(f"[2/{STEPS}] grabbing frames every {args.interval}s (interval mode)")
@@ -217,12 +241,28 @@ def main(argv: list[str] | None = None) -> int:
     print(f"      ->{len(chunks)} chunks, {len(cues)} cues ({cue_source})")
     align(kept, chunks, cues, duration)
 
+    print(f"[8/{STEPS}] navigation: chapters, token estimates" + (f", budget {args.budget}" if args.budget else ""))
+    for s in kept:
+        s.tokens_est = estimate_image_tokens(s.width, s.height) + estimate_text_tokens(s.ocr)
+    score_frames(kept, chunks)
+    budget_info = assign_tiers(kept, args.budget)
+    chapters = build_chapters(metadata, chunks, duration)
+    populate_chapters(chapters, chunks)
+    print(f"      ->{len(chapters)} chapters ({chapters[0].source if chapters else 'none'}); "
+          f"frames by tier {budget_info['frames_by_tier']}; image tokens by tier {budget_info['tokens_by_tier']}")
+
     md_path = out_dir / "paired.md"
     json_path = out_dir / "paired.json"
     manifest_path = out_dir / "manifest.json"
-    print(f"      writing {md_path.name}, {json_path.name}, {manifest_path.name}")
+    print(f"      writing {md_path.name}, {json_path.name}, index.md, index.json, SKILL.md, {manifest_path.name}")
     write_markdown(chunks, md_path, args.url, video_id)
-    write_json(chunks, json_path, args.url, video_id, all_scenes=scenes, cues=cues)
+    write_json(chunks, json_path, args.url, video_id, all_scenes=scenes, cues=cues,
+               metadata=metadata, chapters=chapters, budget_info=budget_info)
+    write_index(chapters, chunks, scenes, out_dir=out_dir, video_id=video_id, source_url=args.url,
+                metadata=metadata, duration=duration, budget_info=budget_info)
+    write_skill(out_dir=out_dir, video_id=video_id, source_url=args.url, metadata=metadata, chapters=chapters,
+                all_scenes=scenes, chunks=chunks, budget_info=budget_info,
+                has_diffs=any(s.diff is not None for s in kept))
     write_manifest(
         build_manifest(
             args=vars(args),
@@ -239,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         f"done. {len(scenes)} frames extracted, {stats['duplicates']} duplicates, "
         f"{sum(stats['dropped_by_kind'].values())} dropped by kind, {paired_count} paired into {len(chunks)} chunks."
     )
+    print(f"  start:    {out_dir / 'SKILL.md'}  then  {out_dir / 'index.md'}")
     print(f"  markdown: {md_path}")
     print(f"  json:     {json_path}")
     print(f"  manifest: {manifest_path}")

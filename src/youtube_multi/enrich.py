@@ -170,6 +170,7 @@ def hash_scenes(scenes: list[Scene]) -> None:
         img = cv2.imread(str(s.image_path))
         if img is None:
             continue
+        s.height, s.width = img.shape[:2]
         s.phash = phash(img)
         s.dhash = dhash(img)
 

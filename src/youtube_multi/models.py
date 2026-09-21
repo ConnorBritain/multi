@@ -64,6 +64,12 @@ class Scene:
     # --- Phase 2 alignment ---
     sentence_index: int = -1  # sentence (within its chunk) the frame appeared during; -1 = before the first
     cue_ids_visible: list[int] = field(default_factory=list)
+    # --- Phase 3 navigation ---
+    width: int = 0
+    height: int = 0
+    tokens_est: int = 0  # image tokens + OCR text tokens, approximate
+    score: float = 0.0  # novelty / OCR density / chunk coverage blend, 0..1
+    tier: int = 1  # 1 = include first, 2 = escalate, 3 = only if needed
 
     @property
     def kept(self) -> bool:

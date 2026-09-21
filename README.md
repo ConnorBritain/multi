@@ -4,11 +4,14 @@ Turn a YouTube video into a curated context pack an LLM agent can navigate: dedu
 
 Given a YouTube URL and a timestamped transcript file, `multi` produces a directory containing:
 
+- `SKILL.md` — how to read the pack and in what order; the file to hand an agent first
+- `index.md` / `index.json` — chapters (from YouTube metadata, or synthesized) → visual states (one row per kept frame: kind, OCR heading, time range, tier) with token estimates per chapter and per frame
 - `frames/` — JPGs captured either at scene-change moments or at a fixed time interval, with near-duplicates and talking-head shots removed
 - `frames/diffs/` — for consecutive frames of the same kind, a text diff of the OCR and a cropped image of the region that changed
-- `paired.md` — the transcript with image references interleaved at the right timestamps, each with its kind, visible time range, OCR text and diff summary
-- `paired.json` — the same data in structured form, plus the list of dropped frames and why
+- `paired.md` — the transcript with image references interleaved after the sentence they appeared during, each with its kind, visible time range, OCR text, deep link and diff summary
+- `paired.json` — the same data in structured form, plus raw caption cues, chapters, dropped frames and why
 - `manifest.json` — how this output was produced (CLI args, library and tool versions, video hash, timestamp)
+- `metadata.json` — cached yt-dlp metadata (title, description, chapters)
 
 Designed for tutorial/lecture content where the visual and the spoken word need to be reasoned about together.
 
@@ -121,11 +124,17 @@ After extraction every frame goes through four cheap passes (no models, no netwo
 - `--keep-dropped` — move dropped frames to `frames/dropped/` instead of deleting them
 - `--no-diff` — skip OCR/pixel diffs between consecutive frames
 - `--no-fetch-cues` — never contact YouTube for raw cues when the transcript file already exists
+- `--no-metadata` — skip the yt-dlp metadata fetch (title/description/chapters); chapters are then synthesized
+- `--budget TOKENS` — image-token budget for tiering: tier 1 fits in `TOKENS`, tier 2 in `2×TOKENS`, the rest is tier 3
 
 ## Output shape
 
 ```
 output/<video_id>/
+├── SKILL.md           # read me first: layout, reading order, field reference
+├── index.md           # chapters → frames table with tiers and token estimates
+├── index.json         # same, structured
+├── metadata.json      # yt-dlp title/description/chapters (cached)
 ├── video.mp4          # downloaded source (gitignored)
 ├── frames/
 │   ├── 0001_t00m00s.jpg   # kept frames only; idx gaps are dropped frames
@@ -176,7 +185,10 @@ Next paragraph...
 
 ```jsonc
 {
-  "source_url": "...", "video_id": "...", "manifest": "manifest.json",
+  "source_url": "...", "video_id": "...", "title": "...", "description": "...", "duration": 540, "channel": "...",
+  "manifest": "manifest.json", "index": "index.json", "skill": "SKILL.md",
+  "budget": { "budget": 20000, "tokens_by_tier": { "1": 19660, "2": 18400, "3": 22100 }, "frames_by_tier": { "1": 16, "2": 15, "3": 18 } },
+  "chapters": [{ "index": 0, "title": "Intro", "start": 0, "end": 95, "url": "...", "source": "youtube", "chunk_ids": [0, 1, 2], "chunk_starts": [0, 30, 60], "frame_ids": [1, 4, 9], "tokens": { "text": 410, "images": 3687, "total": 4097 }, "tokens_tier1": 1639 }],
   "frame_stats": { "extracted": 80, "duplicates": 22, "dropped_by_kind": { "talking-head": 9 }, "kept": 49, "kept_by_kind": { "slide": 40, "code": 9 } },
   "chunks": [{
     "start_seconds": 0, "start_hms": "00:00:00", "url": "https://youtu.be/<id>?t=0", "text": "...",
@@ -188,6 +200,7 @@ Next paragraph...
       "kind": "slide", "kind_confidence": 0.81, "phash": "ebd1940e6bf1940e",
       "visible_from": 5.0, "visible_to": 12.0,
       "sentence_index": 1, "cue_ids_visible": [1, 2],
+      "width": 1280, "height": 720, "tokens_est": 1260, "score": 0.74, "tier": 1,
       "diff": null | { "vs": 1, "text": "frames/diffs/0001_0004.txt", "image": "frames/diffs/0001_0004.jpg", "added": 3, "removed": 1, "changed_region": [x, y, w, h], "changed_frac": 0.14 }
     }]
   }],
@@ -196,15 +209,27 @@ Next paragraph...
 }
 ```
 
+## Navigation layer: chapters, tiers, SKILL.md
+
+The pack is meant to be read progressively rather than linearly:
+
+1. `SKILL.md` explains the layout, the reading order and every field. It is generated per pack with the video's title and counts filled in, and uses the same frontmatter agent skill loaders expect (`name`, `description`).
+2. `index.md` lists chapters with their time range, the `## HH:MM:SS` sections of `paired.md` they span, and token estimates (text / images / tier-1). Under each chapter is one row per kept frame: kind, OCR heading, visible range, tokens, tier, image link. Chapters come from YouTube's metadata (`metadata.json`, fetched via yt-dlp and cached). Videos without chapters get one synthesized chapter if they are ≤ 6 minutes, otherwise ~3-minute chapters cut at chunk boundaries and titled from the first OCR heading in range.
+3. `paired.md` is then read one chapter's sections at a time; `paired.json` / `index.json` carry the same data for programmatic use.
+
+**Token estimates** are deliberately rough: text ≈ characters / 4, images ≈ width × height / 750 (capped at 1,600), which tracks how most vision APIs price a 720p frame. Use them for relative decisions, not billing.
+
+**`--budget TOKENS`** scores every kept frame (`score` = 0.5 × visual novelty vs. the previous frame + 0.3 × OCR density + 0.2 × chunk coverage, where the best frame in each chunk gets the coverage bonus so no chunk goes unrepresented) and assigns `tier` greedily by score: tier 1 until the cumulative image tokens exceed `TOKENS`, tier 2 until `2 × TOKENS`, tier 3 after. A caller includes tier 1 first and escalates. Without `--budget`, scores are still emitted and every frame is tier 1.
+
 ## Feeding it to an LLM
 
-The whole `output/<video_id>/` directory is the artifact. Image paths in `paired.md` are relative to `paired.md`'s location, so the directory is portable — copy or zip it and it still works.
+The whole `output/<video_id>/` directory is the artifact. Image paths are relative, so the directory is portable — copy or zip it and it still works.
 
-**Agentic coding CLIs** (Claude Code, Cursor, Aider, Codex CLI, etc.): point the agent at the directory and ask it to read `paired.md`. Any agent with a file-read + image-read tool will load the JPGs on demand when the visuals matter.
+**Agentic coding CLIs** (Claude Code, Cursor, Aider, Codex CLI, etc.): point the agent at the directory and ask it to read `SKILL.md`, or drop the directory into the agent's skills folder. It will then use `index.md` to pick chapters and open frames by tier when the visuals matter.
 
-**Direct multimodal API calls** (Anthropic, OpenAI, Google Gemini, local vision models via Ollama / llama.cpp / LM Studio, etc.): iterate `paired.json`'s `chunks[]`, sending each chunk's `text` as a text content block and `frames[].image` paths as image content blocks. The JSON is shaped so you can stream chunk-by-chunk to stay under context limits on long videos.
+**Direct multimodal API calls** (Anthropic, OpenAI, Google Gemini, local vision models via Ollama / llama.cpp / LM Studio, etc.): iterate `paired.json`'s `chunks[]`, sending each chunk's `text` as a text content block and the `frames[].image` paths whose `tier` is within your budget as image content blocks. Use `index.json`'s per-chapter `tokens` to decide how much of the video fits, and `chapters[].chunk_ids` to send only the chapters that matter.
 
-**Quick human eyeball:** open `paired.md` in any markdown viewer that renders relative-path images (VS Code's preview works out of the box).
+**Quick human eyeball:** open `index.md` or `paired.md` in any markdown viewer that renders relative-path images (VS Code's preview works out of the box).
 
 ## Tuning the frame count
 
@@ -232,7 +257,8 @@ The code lives in `src/youtube_multi/`, one module per pipeline stage:
 | `extract.py` | scene-change detection and fixed-interval frame grabs |
 | `enrich.py` | tesseract discovery, OCR, pHash dedupe, kind classification, diffs |
 | `align.py` | pairing frames to chunks, sentence splitting/timing, cue overlap |
-| `emit.py` | `paired.md`, `paired.json`, `manifest.json` writers |
+| `navigate.py` | chapters, token estimates, frame scoring and budget tiers |
+| `emit.py` | `paired.md`, `paired.json`, `index.md/json`, `SKILL.md`, `manifest.json` writers |
 | `models.py` | `Scene`/`Chunk` dataclasses and time/URL helpers |
 | `cli.py` | argument parsing and orchestration |
 

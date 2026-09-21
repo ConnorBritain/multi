@@ -33,6 +33,35 @@ def download_video(url: str, out_dir: Path) -> Path:
     return target
 
 
+# --- metadata --------------------------------------------------------------------
+
+_META_KEYS = ("id", "title", "description", "chapters", "duration", "upload_date", "channel", "uploader", "webpage_url")
+
+
+def fetch_metadata(url: str, cache_path: Path) -> dict | None:
+    """Title, description, chapters etc. via yt-dlp (no download), cached as JSON.
+    Returns None when the fetch fails and no cache exists."""
+    if cache_path.is_file():
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            pass
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "skip_download": True}
+    try:
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return None
+    meta = {k: info.get(k) for k in _META_KEYS}
+    meta["chapters"] = [
+        {"start_time": float(c.get("start_time") or 0.0), "end_time": c.get("end_time"), "title": c.get("title")}
+        for c in (meta.get("chapters") or [])
+    ]
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    return meta
+
+
 # --- cues -------------------------------------------------------------------------
 
 

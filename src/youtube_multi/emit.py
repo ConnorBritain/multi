@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Chunk, Cue, Scene, deep_link, hms
+from .navigate import Chapter, chapter_json, estimate_text_tokens
 
 
 def _rel(path: Path | None, out_dir: Path) -> str | None:
@@ -121,6 +122,11 @@ def _frame_json(s: Scene, out_dir: Path, video_id: str) -> dict[str, Any]:
         "visible_to": round(s.visible_to, 2),
         "sentence_index": s.sentence_index,
         "cue_ids_visible": list(s.cue_ids_visible),
+        "width": s.width,
+        "height": s.height,
+        "tokens_est": s.tokens_est,
+        "score": s.score,
+        "tier": s.tier,
         "diff": None,
     }
     if s.diff is not None:
@@ -155,14 +161,29 @@ def write_json(
     video_id: str,
     all_scenes: list[Scene] | None = None,
     cues: list[Cue] | None = None,
+    metadata: dict[str, Any] | None = None,
+    chapters: list[Chapter] | None = None,
+    budget_info: dict[str, Any] | None = None,
 ) -> None:
     out_dir = out_path.parent
     all_scenes = all_scenes if all_scenes is not None else [s for c in chunks for s in c.scenes]
     cues = cues if cues is not None else [cue for c in chunks for cue in c.cues]
+    metadata = metadata or {}
     payload: dict[str, Any] = {
         "source_url": source_url,
         "video_id": video_id,
+        "title": metadata.get("title"),
+        "description": metadata.get("description"),
+        "duration": metadata.get("duration"),
+        "channel": metadata.get("channel") or metadata.get("uploader"),
         "manifest": "manifest.json",
+        "index": "index.json",
+        "skill": "SKILL.md",
+        "budget": budget_info or {"budget": None},
+        "chapters": [
+            {k: v for k, v in chapter_json(ch, chunks, video_id, deep_link).items() if k != "visual_states"}
+            for ch in (chapters or [])
+        ],
         "frame_stats": frame_stats(all_scenes),
         "chunks": [
             {
@@ -203,6 +224,205 @@ def write_json(
         ],
     }
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# --- index.json / index.md --------------------------------------------------------
+
+
+def _fmt_range(a: float, b: float) -> str:
+    return f"{hms(a)}–{hms(b)}"
+
+
+def write_index(
+    chapters: list[Chapter],
+    chunks: list[Chunk],
+    all_scenes: list[Scene],
+    *,
+    out_dir: Path,
+    video_id: str,
+    source_url: str,
+    metadata: dict[str, Any] | None,
+    duration: float,
+    budget_info: dict[str, Any],
+) -> None:
+    metadata = metadata or {}
+    title = metadata.get("title") or video_id
+    kept = [s for s in all_scenes if s.kept]
+    stats = frame_stats(all_scenes)
+    text_tokens = sum(estimate_text_tokens(c.text) for c in chunks)
+    image_tokens = sum(s.tokens_est for s in kept)
+    tier1_tokens = text_tokens + sum(s.tokens_est for s in kept if s.tier == 1)
+
+    ch_json = []
+    for ch in chapters:
+        d = chapter_json(ch, chunks, video_id, deep_link)
+        for vs, s in zip(d["visual_states"], ch.frames):
+            vs["image"] = _rel(s.image_path, out_dir)
+        ch_json.append(d)
+
+    index = {
+        "video_id": video_id,
+        "source_url": source_url,
+        "title": title,
+        "duration": round(duration, 2),
+        "channel": metadata.get("channel") or metadata.get("uploader"),
+        "chapters_source": chapters[0].source if chapters else None,
+        "frame_stats": stats,
+        "tokens": {"text": text_tokens, "images": image_tokens, "total": text_tokens + image_tokens, "tier1": tier1_tokens},
+        "budget": budget_info,
+        "files": {"paired_md": "paired.md", "paired_json": "paired.json", "skill": "SKILL.md", "manifest": "manifest.json"},
+        "chapters": ch_json,
+    }
+    (out_dir / "index.json").write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    lines: list[str] = [
+        f"# {title} — index",
+        "",
+        f"Source: {source_url} · duration {hms(duration)} · {len(chapters)} chapters "
+        f"({chapters[0].source if chapters else 'none'}) · {stats['kept']} frames kept of {stats['extracted']} extracted",
+        "",
+        f"Estimated tokens: text {text_tokens:,} · images {image_tokens:,} · total {text_tokens + image_tokens:,} · "
+        f"text + tier-1 images {tier1_tokens:,}"
+        + (f" (image budget {budget_info['budget']:,})" if budget_info.get("budget") else ""),
+        "",
+        "Read `SKILL.md` first, then pick a chapter below and open only the `## HH:MM:SS` sections of `paired.md` "
+        "listed under it. Open images by tier: 1 first, then 2, then 3.",
+        "",
+        "| # | Chapter | Time | Chunks | Frames | Tokens text / images | Tier-1 tokens |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for ch, d in zip(chapters, ch_json):
+        lines.append(
+            f"| {ch.index + 1} | [{ch.title}](#{_anchor(ch)}) | [{_fmt_range(ch.start, ch.end)}]({d['url']}) | "
+            f"{len(ch.chunk_indices)} | {len(ch.frames)} | {ch.tokens_text:,} / {ch.tokens_images:,} | {d['tokens_tier1']:,} |"
+        )
+    lines.append("")
+    for ch, d in zip(chapters, ch_json):
+        lines.append(f"## {ch.index + 1}. {ch.title}")
+        lines.append("")
+        chunk_refs = ", ".join(f"`## {hms(chunks[i].start_seconds)}`" for i in ch.chunk_indices) or "none"
+        lines.append(f"[▶ {_fmt_range(ch.start, ch.end)}]({d['url']}) · paired.md sections: {chunk_refs}")
+        lines.append("")
+        if not ch.frames:
+            lines.append("_No frames kept in this chapter._")
+            lines.append("")
+            continue
+        lines.append("| Frame | Time | Kind | Heading | Visible | Tokens | Tier | Image |")
+        lines.append("|---|---|---|---|---|---|---|---|")
+        for vs, s in zip(d["visual_states"], ch.frames):
+            heading = vs["heading"].replace("|", "\\|")
+            lines.append(
+                f"| {s.idx:04d} | [{hms(s.t_seconds)}]({vs['url']}) | {s.kind} ({s.kind_confidence:.2f}) | {heading} | "
+                f"{_fmt_range(s.visible_from, s.visible_to)} | {s.tokens_est:,} | {s.tier} | [{Path(vs['image']).name}]({vs['image']}) |"
+            )
+        lines.append("")
+    (out_dir / "index.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def _anchor(ch: Chapter) -> str:
+    import re
+
+    text = f"{ch.index + 1}. {ch.title}".lower()
+    text = re.sub(r"[^\w\s-]", "", text)
+    return re.sub(r"\s+", "-", text.strip())
+
+
+# --- SKILL.md ------------------------------------------------------------------------
+
+
+def write_skill(
+    *,
+    out_dir: Path,
+    video_id: str,
+    source_url: str,
+    metadata: dict[str, Any] | None,
+    chapters: list[Chapter],
+    all_scenes: list[Scene],
+    chunks: list[Chunk],
+    budget_info: dict[str, Any],
+    has_diffs: bool,
+) -> None:
+    metadata = metadata or {}
+    title = metadata.get("title") or video_id
+    stats = frame_stats(all_scenes)
+    kept = [s for s in all_scenes if s.kept]
+    image_tokens = sum(s.tokens_est for s in kept)
+    text_tokens = sum(estimate_text_tokens(c.text) for c in chunks)
+    tier1 = sum(s.tokens_est for s in kept if s.tier == 1)
+    kinds = ", ".join(f"{k} ×{v}" for k, v in stats["kept_by_kind"].items()) or "none"
+    budget_line = (
+        f"A token budget of {budget_info['budget']:,} was requested: tier-1 frames total ≈{tier1:,} image tokens."
+        if budget_info.get("budget")
+        else "No token budget was requested, so every kept frame is tier 1."
+    )
+    body = f"""---
+name: video-context-pack-{video_id}
+description: Context pack for the YouTube video "{title}" ({video_id}) — transcript, deduplicated and classified frames, OCR, frame diffs, chapters and token estimates. Read this file first, then index.md.
+---
+
+# How to read this context pack
+
+This directory is a curated, navigable representation of {source_url} ("{title}").
+It was generated by `multi`; nothing here was written by a person. Read progressively —
+summary → chapter → chunk → frame — rather than opening every image.
+
+## Layout
+
+```
+SKILL.md        this file
+index.md/json   chapters → visual states (one row per kept frame) with time ranges, headings and token estimates
+paired.md/json  the transcript, chunk by chunk (## HH:MM:SS), with frames inserted after the sentence they appeared during
+manifest.json   how this pack was produced (args, versions, video hash)
+metadata.json   raw yt-dlp metadata (title, description, chapters) when it could be fetched
+frames/         kept frames only: NNNN_tMMmSSs.jpg (NNNN = extraction index; gaps are dropped frames)
+frames/diffs/   for consecutive frames of the same kind: <a>_<b>.txt (OCR line diff) and <a>_<b>.jpg (crop of the changed region)
+```
+
+## Recommended reading order
+
+1. **index.md** — pick the chapter(s) relevant to the question. Each chapter row gives its time range, the
+   `## HH:MM:SS` sections of paired.md it spans, and its token cost.
+2. **paired.md, only those sections** — read the transcript text. Every frame line looks like
+   `![scene NNNN @ HH:MM:SS](frames/...)` followed by `> kind`, `> OCR` and `> diff` notes. The OCR
+   text and diff summary are often enough; open the image only when the visual matters.
+3. **Frames by tier** — open tier-1 images first (`tier` in index.json / paired.json), escalate to tier 2
+   and 3 only if the answer still depends on the visual. {budget_line}
+4. **frames/diffs/** — when two consecutive frames are the same kind (e.g. a code file being edited), read
+   the `.txt` diff instead of both images; the `.jpg` is just the changed region.
+5. **paired.json / index.json** — for programmatic access (exact seconds, cue ids, hashes, scores).
+
+## Field reference
+
+- `kind` (`slide | code | terminal | diagram | talking-head | whiteboard | other`) with `kind_confidence` 0–1:
+  a heuristic classification (OCR density, monospace layout, faces, colour, boxes). Trust high-confidence
+  values; treat low ones as hints. Frames of the kinds listed in manifest.json `args.drop` were removed
+  (default: talking-head) and are listed in paired.json `dropped_frames`.
+- `visible_from` / `visible_to` (seconds): the frame was on screen for this whole range; consecutive
+  near-duplicates were collapsed into it (`frame_stats.duplicates`).
+- `sentence_index`: which sentence of the chunk was being spoken when the frame appeared (-1 = before the
+  chunk's first sentence). `cue_ids_visible`: raw caption cues (paired.json `cues`) spoken while it was visible.
+- `url`: a `https://youtu.be/{video_id}?t=<seconds>` deep link — cite these when pointing at a moment.
+- `ocr` / `ocr_lines` / `ocr_confidence`: Tesseract output (flat, per line, mean word confidence 0–100).
+  Expect noise on small or stylised text.
+- `tokens_est`: approximate cost of the image (≈ width×height/750, capped) plus its OCR text.
+  `score` blends visual novelty, OCR density and chunk coverage; `tier` is derived from score and the budget.
+- `diff`: `vs` is the previous frame's index; `added`/`removed` count OCR lines; `changed_region` is
+  `[x, y, w, h]` in the frame's pixels; `changed_frac` is the fraction of pixels that changed.
+
+## This pack at a glance
+
+- Chapters: {len(chapters)} ({chapters[0].source if chapters else 'none'})
+- Frames: {stats['kept']} kept of {stats['extracted']} extracted ({stats['duplicates']} duplicates, {sum(stats['dropped_by_kind'].values())} dropped by kind); kept kinds: {kinds}
+- Estimated tokens: transcript ≈{text_tokens:,}, all kept images ≈{image_tokens:,}, tier-1 images ≈{tier1:,}
+- Diffs: {'present in frames/diffs/' if has_diffs else 'none'}
+
+## Caveats
+
+- Classification and OCR are heuristic, offline and cheap; verify anything load-bearing against the image.
+- Sentence timing is interpolated from caption cues; it is accurate to a few seconds, not to the word.
+- Frame indices are not contiguous; that is expected.
+"""
+    (out_dir / "SKILL.md").write_text(body, encoding="utf-8")
 
 
 # --- manifest -----------------------------------------------------------------

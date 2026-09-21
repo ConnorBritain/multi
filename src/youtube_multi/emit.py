@@ -12,7 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from .models import Chunk, Scene, hms
+from .models import Chunk, Cue, Scene, deep_link, hms
 
 
 def _rel(path: Path | None, out_dir: Path) -> str | None:
@@ -24,12 +24,13 @@ def _rel(path: Path | None, out_dir: Path) -> str | None:
         return path.as_posix()
 
 
-def _scene_md_lines(scene: Scene, out_dir: Path) -> list[str]:
+def _scene_md_lines(scene: Scene, out_dir: Path, video_id: str) -> list[str]:
     rel = _rel(scene.image_path, out_dir)
     lines = [f"![scene {scene.idx:04d} @ {hms(scene.t_seconds)}]({rel})"]
     meta = f"> kind: {scene.kind} ({scene.kind_confidence:.2f})"
     if scene.visible_to > scene.visible_from:
         meta += f" · visible {hms(scene.visible_from)}–{hms(scene.visible_to)}"
+    meta += f" · [▶ {hms(scene.t_seconds)}]({deep_link(video_id, scene.t_seconds)})"
     lines.append(meta)
     if scene.ocr:
         lines.append(f"> OCR: {scene.ocr}")
@@ -63,19 +64,52 @@ def write_markdown(
         "",
     ]
     for chunk in chunks:
+        # Heading line kept exactly as in the original format; the deep link sits below it.
         lines.append(f"## {hms(chunk.start_seconds)}")
         lines.append("")
-        lines.append(chunk.text)
+        lines.append(f"[▶ {hms(chunk.start_seconds)}]({deep_link(video_id, chunk.start_seconds)})")
         lines.append("")
-        for scene in chunk.scenes:
-            lines.extend(_scene_md_lines(scene, out_dir))
+        lines.extend(_chunk_body_md(chunk, out_dir, video_id))
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _frame_json(s: Scene, out_dir: Path) -> dict[str, Any]:
+def _chunk_body_md(chunk: Chunk, out_dir: Path, video_id: str) -> list[str]:
+    """Transcript sentences with each frame inserted after the sentence it
+    appeared during (frames before the first sentence come first)."""
+    if not chunk.sentences:
+        lines = [chunk.text, ""]
+        for scene in chunk.scenes:
+            lines.extend(_scene_md_lines(scene, out_dir, video_id))
+        return lines
+
+    by_sentence: dict[int, list[Scene]] = {}
+    for scene in chunk.scenes:
+        by_sentence.setdefault(scene.sentence_index, []).append(scene)
+
+    lines: list[str] = []
+    for scene in by_sentence.get(-1, []):
+        lines.extend(_scene_md_lines(scene, out_dir, video_id))
+    paragraph: list[str] = []
+    for sentence in chunk.sentences:
+        paragraph.append(sentence.text)
+        scenes_here = by_sentence.get(sentence.index)
+        if scenes_here:
+            lines.append(" ".join(paragraph))
+            lines.append("")
+            paragraph = []
+            for scene in scenes_here:
+                lines.extend(_scene_md_lines(scene, out_dir, video_id))
+    if paragraph:
+        lines.append(" ".join(paragraph))
+        lines.append("")
+    return lines
+
+
+def _frame_json(s: Scene, out_dir: Path, video_id: str) -> dict[str, Any]:
     d: dict[str, Any] = {
         "idx": s.idx,
         "t_seconds": round(s.t_seconds, 2),
+        "url": deep_link(video_id, s.t_seconds),
         "image": _rel(s.image_path, out_dir),
         "ocr": s.ocr,
         "ocr_lines": s.ocr_lines,
@@ -85,6 +119,8 @@ def _frame_json(s: Scene, out_dir: Path) -> dict[str, Any]:
         "phash": f"{s.phash:016x}",
         "visible_from": round(s.visible_from, 2),
         "visible_to": round(s.visible_to, 2),
+        "sentence_index": s.sentence_index,
+        "cue_ids_visible": list(s.cue_ids_visible),
         "diff": None,
     }
     if s.diff is not None:
@@ -118,9 +154,11 @@ def write_json(
     source_url: str,
     video_id: str,
     all_scenes: list[Scene] | None = None,
+    cues: list[Cue] | None = None,
 ) -> None:
     out_dir = out_path.parent
     all_scenes = all_scenes if all_scenes is not None else [s for c in chunks for s in c.scenes]
+    cues = cues if cues is not None else [cue for c in chunks for cue in c.cues]
     payload: dict[str, Any] = {
         "source_url": source_url,
         "video_id": video_id,
@@ -130,10 +168,26 @@ def write_json(
             {
                 "start_seconds": c.start_seconds,
                 "start_hms": hms(c.start_seconds),
+                "url": deep_link(video_id, c.start_seconds),
                 "text": c.text,
-                "frames": [_frame_json(s, out_dir) for s in c.scenes],
+                "sentences": [
+                    {"index": s.index, "start": s.start, "url": deep_link(video_id, s.start), "text": s.text}
+                    for s in c.sentences
+                ],
+                "cue_ids": [cue.id for cue in c.cues],
+                "frames": [_frame_json(s, out_dir, video_id) for s in c.scenes],
             }
             for c in chunks
+        ],
+        "cues": [
+            {
+                "id": cue.id,
+                "start": round(cue.start, 3),
+                "duration": round(cue.duration, 3),
+                "url": deep_link(video_id, cue.start),
+                "text": cue.text,
+            }
+            for cue in cues
         ],
         "dropped_frames": [
             {

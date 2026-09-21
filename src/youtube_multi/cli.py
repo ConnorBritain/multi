@@ -11,7 +11,7 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-from .align import pair_scenes
+from .align import align
 from .emit import build_manifest, frame_stats, write_json, write_manifest, write_markdown
 from .enrich import (
     classify_scene,
@@ -27,12 +27,17 @@ from .enrich import (
 from .extract import detect_scenes, extract_interval_frames, video_duration
 from .fetch import (
     aggregate_cues,
+    cues_path_for,
+    cues_to_chunks,
     download_video,
-    fetch_transcript_youtube,
+    fetch_cues_youtube,
     parse_transcript,
+    read_cues_file,
+    synthesize_cues,
+    write_cues_file,
     write_transcript_file,
 )
-from .models import KINDS, extract_video_id
+from .models import KINDS, Chunk, Cue, extract_video_id
 
 STEPS = 7
 
@@ -96,7 +101,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Move dropped frames to frames/dropped/ instead of deleting them",
     )
     ap.add_argument("--no-diff", action="store_true", help="Skip OCR/pixel diffs between consecutive frames")
+    ap.add_argument(
+        "--no-fetch-cues",
+        action="store_true",
+        help="Never contact YouTube for raw caption cues when the transcript file already exists "
+        "(sentence timing then interpolates across each chunk).",
+    )
     return ap
+
+
+def _load_cues(
+    video_id: str, transcript_path: Path, chunks: list[Chunk], languages: list[str], duration: float, allow_fetch: bool
+) -> tuple[list[Cue], str]:
+    """Raw cues from transcripts/<id>.cues.json, fetched if missing and allowed,
+    else synthesized one-per-chunk. Returns (cues, source)."""
+    cues_path = cues_path_for(transcript_path)
+    if cues_path.is_file():
+        try:
+            return read_cues_file(cues_path), f"file:{cues_path}"
+        except (ValueError, KeyError, OSError) as e:
+            print(f"  [warn] could not read {cues_path}: {e}", file=sys.stderr)
+    if allow_fetch:
+        try:
+            cues = fetch_cues_youtube(video_id, languages)
+            write_cues_file(cues, cues_path)
+            return cues, f"fetched -> {cues_path}"
+        except Exception as e:  # network, no captions, etc. — cues are best-effort
+            print(f"  [warn] could not fetch raw cues ({type(e).__name__}); synthesizing from chunks", file=sys.stderr)
+    return synthesize_cues(chunks, duration), "synthesized from chunks"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,11 +145,11 @@ def main(argv: list[str] | None = None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     transcript_path: Path = args.transcript or Path("transcripts") / f"{video_id}.txt"
+    languages = args.lang or ["en", "en-US", "en-GB"]
     if not transcript_path.is_file():
-        languages = args.lang or ["en", "en-US", "en-GB"]
         print(f"[0/{STEPS}] fetching captions for {video_id} (langs={','.join(languages)})")
         try:
-            cues = fetch_transcript_youtube(video_id, languages)
+            raw_cues = fetch_cues_youtube(video_id, languages)
         except (TranscriptsDisabled, NoTranscriptFound) as e:
             print(
                 f"\nNo YouTube captions available for {video_id} "
@@ -129,9 +161,11 @@ def main(argv: list[str] | None = None) -> int:
         except VideoUnavailable as e:
             print(f"\nVideo unavailable: {e}", file=sys.stderr)
             return 4
-        chunks_to_save = aggregate_cues(cues, args.chunk_seconds)
+        chunks_to_save = aggregate_cues(cues_to_chunks(raw_cues), args.chunk_seconds)
         write_transcript_file(chunks_to_save, transcript_path)
-        print(f"      ->{len(cues)} cues, saved {len(chunks_to_save)} chunks to {transcript_path}")
+        write_cues_file(raw_cues, cues_path_for(transcript_path))
+        print(f"      ->{len(raw_cues)} cues, saved {len(chunks_to_save)} chunks to {transcript_path} "
+              f"(raw cues in {cues_path_for(transcript_path).name})")
 
     print(f"[1/{STEPS}] downloading video ->{out_dir / 'video.mp4'}")
     video_path = download_video(args.url, out_dir)
@@ -179,15 +213,16 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[7/{STEPS}] parsing transcript: {transcript_path}")
     chunks = parse_transcript(transcript_path)
-    print(f"      ->{len(chunks)} chunks")
-    pair_scenes(kept, chunks)
+    cues, cue_source = _load_cues(video_id, transcript_path, chunks, languages, duration, allow_fetch=not args.no_fetch_cues)
+    print(f"      ->{len(chunks)} chunks, {len(cues)} cues ({cue_source})")
+    align(kept, chunks, cues, duration)
 
     md_path = out_dir / "paired.md"
     json_path = out_dir / "paired.json"
     manifest_path = out_dir / "manifest.json"
     print(f"      writing {md_path.name}, {json_path.name}, {manifest_path.name}")
     write_markdown(chunks, md_path, args.url, video_id)
-    write_json(chunks, json_path, args.url, video_id, all_scenes=scenes)
+    write_json(chunks, json_path, args.url, video_id, all_scenes=scenes, cues=cues)
     write_manifest(
         build_manifest(
             args=vars(args),

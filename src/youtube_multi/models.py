@@ -22,6 +22,27 @@ class Diff:
 
 
 @dataclass
+class Cue:
+    """A raw caption cue as delivered by the captions source."""
+
+    id: int
+    start: float
+    duration: float
+    text: str
+
+    @property
+    def end(self) -> float:
+        return self.start + self.duration
+
+
+@dataclass
+class Sentence:
+    index: int
+    start: float
+    text: str
+
+
+@dataclass
 class Scene:
     idx: int
     t_seconds: float
@@ -40,6 +61,9 @@ class Scene:
     diff: Diff | None = None
     dropped_reason: str | None = None  # "duplicate" | "kind:<kind>"
     duplicate_of: int | None = None
+    # --- Phase 2 alignment ---
+    sentence_index: int = -1  # sentence (within its chunk) the frame appeared during; -1 = before the first
+    cue_ids_visible: list[int] = field(default_factory=list)
 
     @property
     def kept(self) -> bool:
@@ -51,6 +75,9 @@ class Chunk:
     start_seconds: int
     text: str
     scenes: list[Scene] = field(default_factory=list)
+    # --- Phase 2 alignment ---
+    cues: list[Cue] = field(default_factory=list)
+    sentences: list[Sentence] = field(default_factory=list)
 
 
 _VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|/embed/|/shorts/)([A-Za-z0-9_-]{11})")
@@ -71,3 +98,7 @@ def hms(seconds: float) -> str:
 def short_ms(seconds: float) -> str:
     s = int(seconds)
     return f"{s // 60:02d}m{s % 60:02d}s"
+
+
+def deep_link(video_id: str, seconds: float) -> str:
+    return f"https://youtu.be/{video_id}?t={int(seconds)}"

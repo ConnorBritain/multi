@@ -60,6 +60,14 @@ On every run, `multi` looks for `transcripts/<video_id>.txt` (or whatever `--tra
 
 This means re-runs are cached and you can hand-edit the transcript file between runs to fix bad auto-captions.
 
+The raw per-cue captions (float start, duration, text) are saved next to the transcript as `transcripts/<video_id>.cues.json` and are what sentence-level timing is built from. If that file is missing but the `.txt` exists (a transcript from an older run, or one you wrote by hand), `multi` fetches the cues once and caches them; pass `--no-fetch-cues` to stay offline, in which case each chunk becomes a single cue and sentence times are interpolated across the chunk. Hand edits to the `.txt` never touch the cues file.
+
+### Sentence-level placement and deep links
+
+Each chunk's text is split into sentences, and each sentence gets a start time by mapping its character offset onto the chunk's cue timeline. A frame is then inserted in `paired.md` right after the sentence that was being spoken when it appeared (`sentence_index` in JSON; `-1` means before the chunk's first sentence). Each frame also records `cue_ids_visible`, the cues spoken while it was on screen (over its `visible_from`–`visible_to` range).
+
+Every timestamp in `paired.md` and `paired.json` carries a `https://youtu.be/<id>?t=<seconds>` link (`url` fields; `[▶ HH:MM:SS](...)` lines in markdown) so an agent can cite or jump to the exact moment.
+
 If a video has no captions at all, you can supply your own:
 
 ```
@@ -112,6 +120,7 @@ After extraction every frame goes through four cheap passes (no models, no netwo
 - `--drop KIND` — drop frames of this kind; repeatable or comma-separated (default `talking-head`; `none` keeps all)
 - `--keep-dropped` — move dropped frames to `frames/dropped/` instead of deleting them
 - `--no-diff` — skip OCR/pixel diffs between consecutive frames
+- `--no-fetch-cues` — never contact YouTube for raw cues when the transcript file already exists
 
 ## Output shape
 
@@ -141,18 +150,24 @@ Source: https://youtu.be/...
 
 ## 00:00:00
 
-First paragraph of the transcript...
+[▶ 00:00:00](https://youtu.be/<video_id>?t=0)
 
-![scene 0001 @ 00:00:00](frames/0001_t00m00s.jpg)
-> kind: slide (0.81) · visible 00:00:00–00:00:12
+First sentence of the transcript. Second sentence, during which the first frame appeared.
+
+![scene 0001 @ 00:00:05](frames/0001_t00m05s.jpg)
+> kind: slide (0.81) · visible 00:00:05–00:00:12 · [▶ 00:00:05](https://youtu.be/<video_id>?t=5)
 > OCR: extracted text from the slide
 
+Third sentence. Fourth sentence.
+
 ![scene 0004 @ 00:00:12](frames/0004_t00m12s.jpg)
-> kind: slide (0.77) · visible 00:00:12–00:00:31
+> kind: slide (0.77) · visible 00:00:12–00:00:31 · [▶ 00:00:12](https://youtu.be/<video_id>?t=12)
 > OCR: extracted text from the next slide
 > diff vs 0001: +3 −1 lines, 14% of pixels changed (frames/diffs/0001_0004.txt, frames/diffs/0001_0004.jpg)
 
 ## 00:00:27
+
+[▶ 00:00:27](https://youtu.be/<video_id>?t=27)
 
 Next paragraph...
 ```
@@ -164,15 +179,19 @@ Next paragraph...
   "source_url": "...", "video_id": "...", "manifest": "manifest.json",
   "frame_stats": { "extracted": 80, "duplicates": 22, "dropped_by_kind": { "talking-head": 9 }, "kept": 49, "kept_by_kind": { "slide": 40, "code": 9 } },
   "chunks": [{
-    "start_seconds": 0, "start_hms": "00:00:00", "text": "...",
+    "start_seconds": 0, "start_hms": "00:00:00", "url": "https://youtu.be/<id>?t=0", "text": "...",
+    "sentences": [{ "index": 0, "start": 0.0, "url": "...", "text": "First sentence." }],
+    "cue_ids": [0, 1, 2],
     "frames": [{
-      "idx": 1, "t_seconds": 0.0, "image": "frames/0001_t00m00s.jpg", "ocr": "...",
+      "idx": 1, "t_seconds": 5.0, "url": "https://youtu.be/<id>?t=5", "image": "frames/0001_t00m05s.jpg", "ocr": "...",
       "ocr_lines": ["..."], "ocr_confidence": 91.3,
       "kind": "slide", "kind_confidence": 0.81, "phash": "ebd1940e6bf1940e",
-      "visible_from": 0.0, "visible_to": 12.0,
+      "visible_from": 5.0, "visible_to": 12.0,
+      "sentence_index": 1, "cue_ids_visible": [1, 2],
       "diff": null | { "vs": 1, "text": "frames/diffs/0001_0004.txt", "image": "frames/diffs/0001_0004.jpg", "added": 3, "removed": 1, "changed_region": [x, y, w, h], "changed_frac": 0.14 }
     }]
   }],
+  "cues": [{ "id": 0, "start": 0.0, "duration": 3.2, "url": "...", "text": "raw caption cue" }],
   "dropped_frames": [{ "idx": 2, "t_seconds": 1.0, "reason": "duplicate", "duplicate_of": 1, "kind": "other", "image": null }]
 }
 ```
@@ -209,10 +228,10 @@ The code lives in `src/youtube_multi/`, one module per pipeline stage:
 
 | Module | Responsibility |
 |---|---|
-| `fetch.py` | video download, caption fetch, transcript file read/write |
+| `fetch.py` | video download, caption/cue fetch, transcript and cues file read/write |
 | `extract.py` | scene-change detection and fixed-interval frame grabs |
 | `enrich.py` | tesseract discovery, OCR, pHash dedupe, kind classification, diffs |
-| `align.py` | pairing frames to transcript chunks |
+| `align.py` | pairing frames to chunks, sentence splitting/timing, cue overlap |
 | `emit.py` | `paired.md`, `paired.json`, `manifest.json` writers |
 | `models.py` | `Scene`/`Chunk` dataclasses and time/URL helpers |
 | `cli.py` | argument parsing and orchestration |

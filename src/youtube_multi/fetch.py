@@ -1,13 +1,14 @@
 """Fetching: video download and caption/transcript handling."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
 from youtube_transcript_api import YouTubeTranscriptApi
 
-from .models import Chunk, hms
+from .models import Chunk, Cue, hms
 
 
 def download_video(url: str, out_dir: Path) -> Path:
@@ -32,15 +33,55 @@ def download_video(url: str, out_dir: Path) -> Path:
     return target
 
 
-def fetch_transcript_youtube(video_id: str, languages: list[str]) -> list[Chunk]:
+# --- cues -------------------------------------------------------------------------
+
+
+def fetch_cues_youtube(video_id: str, languages: list[str]) -> list[Cue]:
+    """Raw caption cues with float start/duration, whitespace-normalised."""
     api = YouTubeTranscriptApi()
     fetched = api.fetch(video_id, languages=languages)
-    cues: list[Chunk] = []
+    cues: list[Cue] = []
     for snippet in fetched.snippets:
         text = re.sub(r"\s+", " ", snippet.text).strip()
         if text:
-            cues.append(Chunk(start_seconds=round(snippet.start), text=text))
+            cues.append(Cue(id=len(cues), start=float(snippet.start), duration=float(snippet.duration), text=text))
     return cues
+
+
+def cues_to_chunks(cues: list[Cue]) -> list[Chunk]:
+    return [Chunk(start_seconds=round(c.start), text=c.text) for c in cues]
+
+
+def fetch_transcript_youtube(video_id: str, languages: list[str]) -> list[Chunk]:
+    """Backward-compatible wrapper: one Chunk per cue with a rounded start."""
+    return cues_to_chunks(fetch_cues_youtube(video_id, languages))
+
+
+def cues_path_for(transcript_path: Path) -> Path:
+    return transcript_path.with_name(transcript_path.stem + ".cues.json")
+
+
+def write_cues_file(cues: list[Cue], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = [{"id": c.id, "start": round(c.start, 3), "duration": round(c.duration, 3), "text": c.text} for c in cues]
+    path.write_text(json.dumps(payload, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def read_cues_file(path: Path) -> list[Cue]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return [Cue(id=int(c.get("id", i)), start=float(c["start"]), duration=float(c["duration"]), text=str(c["text"])) for i, c in enumerate(raw)]
+
+
+def synthesize_cues(chunks: list[Chunk], duration: float) -> list[Cue]:
+    """One cue per chunk when no raw cues exist (hand-written transcripts)."""
+    cues: list[Cue] = []
+    for i, c in enumerate(chunks):
+        end = float(chunks[i + 1].start_seconds) if i + 1 < len(chunks) else max(duration, float(c.start_seconds))
+        cues.append(Cue(id=i, start=float(c.start_seconds), duration=max(0.0, end - float(c.start_seconds)), text=c.text))
+    return cues
+
+
+# --- transcript text file --------------------------------------------------------------
 
 
 def aggregate_cues(cues: list[Chunk], target_seconds: float) -> list[Chunk]:

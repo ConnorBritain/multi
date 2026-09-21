@@ -39,6 +39,15 @@ def _assert_schema_compat(data: dict, md: str) -> None:
     assert md.startswith("# YouTube paired transcript — ")
     assert re.search(r"^## \d\d:\d\d:\d\d$", md, re.M)
     assert re.search(r"^!\[scene \d{4} @ \d\d:\d\d:\d\d\]\(frames/\d{4}_t\d\dm\d\ds\.jpg\)$", md, re.M)
+    # Phase 2: every chunk and frame carries a deep link
+    assert re.search(r"^\[▶ \d\d:\d\d:\d\d\]\(https://youtu\.be/AAAAAAAAAAA\?t=\d+\)$", md, re.M)
+    for c in data["chunks"]:
+        assert c["url"] == f"https://youtu.be/AAAAAAAAAAA?t={c['start_seconds']}"
+        assert isinstance(c["sentences"], list) and isinstance(c["cue_ids"], list)
+        for f in c["frames"]:
+            assert f["url"].startswith("https://youtu.be/AAAAAAAAAAA?t=")
+            assert isinstance(f["sentence_index"], int) and isinstance(f["cue_ids_visible"], list)
+    assert isinstance(data["cues"], list) and data["cues"], "cues synthesized when no cues.json exists"
 
 
 @pytest.mark.parametrize("ocr", [pytest.param(False, id="noocr"), pytest.param(True, id="ocr", marks=pytest.mark.skipif(not tesseract_available(), reason="no tesseract"))])

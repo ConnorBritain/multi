@@ -11,26 +11,35 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from .models import Chunk, Cue, hms
 
 
+# Frames are all multi needs from the video (captions come from the transcript API), so ask for the
+# video-only stream. YouTube stopped serving combined audio+video files at most resolutions, and the old
+# "b[height<=720]" selector now fails with "Requested format is not available" or HTTP 403.
+# H.264 first (OpenCV and PySceneDetect decode it everywhere), then any codec, then combined files as a fallback.
+VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080]/b"
+
+
 def download_video(url: str, out_dir: Path) -> Path:
-    target = out_dir / "video.mp4"
-    if target.exists():
-        print(f"  [skip] {target.name} already exists")
-        return target
+    existing = sorted(p for p in out_dir.glob("video.*") if not p.name.endswith((".part", ".ytdl")))
+    if existing:
+        print(f"  [skip] {existing[0].name} already exists")
+        return existing[0]
     out_dir.mkdir(parents=True, exist_ok=True)
     opts = {
-        "format": "b[ext=mp4][height<=720]/b[height<=720]/b[ext=mp4]/b",
+        "format": VIDEO_FORMAT,
         "outtmpl": str(out_dir / "video.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
     }
     with YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    if not target.exists():
-        produced = list(out_dir.glob("video.*"))
-        if produced:
-            produced[0].rename(target)
-    return target
+        info = ydl.extract_info(url, download=True)
+        produced = Path(ydl.prepare_filename(info))
+    if produced.exists():
+        return produced
+    found = sorted(out_dir.glob("video.*"))
+    if not found:
+        raise RuntimeError(f"yt-dlp finished but no video file appeared in {out_dir}")
+    return found[0]
 
 
 # --- metadata --------------------------------------------------------------------

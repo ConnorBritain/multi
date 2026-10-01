@@ -146,7 +146,7 @@ output/<video_id>/
 │   ├── app.py         # folded from code frames that showed "app.py"
 │   ├── unknown_1.js   # filename not visible; language guessed
 │   └── commands.sh    # prompt lines from terminal frames, timestamped
-├── video.mp4          # downloaded source (gitignored)
+├── video.<ext>        # downloaded source: video-only stream, up to 1080p, H.264 when offered (gitignored)
 ├── frames/
 │   ├── 0001_t00m00s.jpg   # kept frames only; idx gaps are dropped frames
 │   ├── 0004_t00m03s.jpg

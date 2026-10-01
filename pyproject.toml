@@ -3,7 +3,7 @@ name = "youtube-multi"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "yt-dlp>=2025.1.0",
+    "yt-dlp>=2026.8.19",
     "scenedetect>=0.7",
     "opencv-python>=4.10",
     "numpy>=2.0",

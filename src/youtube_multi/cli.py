@@ -188,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"      ->{len(raw_cues)} cues, saved {len(chunks_to_save)} chunks to {transcript_path} "
               f"(raw cues in {cues_path_for(transcript_path).name})")
 
-    print(f"[1/{STEPS}] downloading video ->{out_dir / 'video.mp4'}")
+    print(f"[1/{STEPS}] downloading video -> {out_dir}")
     video_path = download_video(args.url, out_dir)
     duration = video_duration(video_path)
     metadata = None

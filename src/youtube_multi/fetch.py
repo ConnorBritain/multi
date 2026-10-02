@@ -6,31 +6,62 @@ import re
 from pathlib import Path
 
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 from youtube_transcript_api import YouTubeTranscriptApi
 
 from .models import Chunk, Cue, hms
 
 
-def download_video(url: str, out_dir: Path) -> Path:
-    target = out_dir / "video.mp4"
-    if target.exists():
-        print(f"  [skip] {target.name} already exists")
-        return target
-    out_dir.mkdir(parents=True, exist_ok=True)
+# Frames are all multi needs from the video (captions come from the transcript API), so ask for the
+# video-only stream. YouTube stopped serving combined audio+video files at most resolutions, and the old
+# "b[height<=720]" selector now fails with "Requested format is not available" or HTTP 403.
+# H.264 first (OpenCV and PySceneDetect decode it everywhere), then any codec, then combined files as a fallback.
+VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080]/b"
+
+
+# If YouTube refuses the default player client (HTTP 403 on the stream), retry as the mobile-web client,
+# which still served these videos in October 2026.
+FALLBACK_PLAYER_CLIENTS = ("mweb",)
+
+
+def _download_opts(out_dir: Path, player_client: str | None = None) -> dict:
     opts = {
-        "format": "b[ext=mp4][height<=720]/b[height<=720]/b[ext=mp4]/b",
+        "format": VIDEO_FORMAT,
         "outtmpl": str(out_dir / "video.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
     }
-    with YoutubeDL(opts) as ydl:
-        ydl.download([url])
-    if not target.exists():
-        produced = list(out_dir.glob("video.*"))
-        if produced:
-            produced[0].rename(target)
-    return target
+    if player_client:
+        opts["extractor_args"] = {"youtube": {"player_client": [player_client]}}
+    return opts
+
+
+def download_video(url: str, out_dir: Path) -> Path:
+    existing = sorted(p for p in out_dir.glob("video.*") if not p.name.endswith((".part", ".ytdl")))
+    if existing:
+        print(f"  [skip] {existing[0].name} already exists")
+        return existing[0]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    attempts: list[str | None] = [None, *FALLBACK_PLAYER_CLIENTS]
+    for i, client in enumerate(attempts):
+        try:
+            with YoutubeDL(_download_opts(out_dir, client)) as ydl:
+                info = ydl.extract_info(url, download=True)
+                produced = Path(ydl.prepare_filename(info))
+            break
+        except DownloadError:
+            if i == len(attempts) - 1:
+                raise
+            print(f"  [retry] download failed; trying the {attempts[i + 1]} player client")
+            for partial in out_dir.glob("video.*"):
+                partial.unlink(missing_ok=True)
+    if produced.exists():
+        return produced
+    found = sorted(out_dir.glob("video.*"))
+    if not found:
+        raise RuntimeError(f"yt-dlp finished but no video file appeared in {out_dir}")
+    return found[0]
 
 
 # --- metadata --------------------------------------------------------------------

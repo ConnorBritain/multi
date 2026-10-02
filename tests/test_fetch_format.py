@@ -41,3 +41,48 @@ def test_falls_back_to_any_codec_when_no_h264_stream() -> None:
 def test_falls_back_to_combined_file() -> None:
     formats = [_fmt("18", height=360, vcodec="avc1.42001E", acodec="mp4a.40.2", ext="mp4")]
     assert _pick(formats) == ["18"]
+
+
+# Why: when YouTube returns HTTP 403 to the default client, the retry must actually switch client;
+# otherwise the fallback repeats the same failing request.
+def test_fallback_options_switch_player_client(tmp_path) -> None:
+    from youtube_multi.fetch import FALLBACK_PLAYER_CLIENTS, _download_opts
+
+    assert "extractor_args" not in _download_opts(tmp_path)
+    fallback = _download_opts(tmp_path, FALLBACK_PLAYER_CLIENTS[0])
+    assert fallback["extractor_args"] == {"youtube": {"player_client": ["mweb"]}}
+    assert fallback["format"] == VIDEO_FORMAT
+
+
+# Why: the first attempt failing must not end the run while a fallback client remains.
+def test_download_retries_with_fallback_client(tmp_path, monkeypatch) -> None:
+    from yt_dlp.utils import DownloadError
+
+    from youtube_multi import fetch
+
+    calls: list[dict] = []
+
+    class FakeYDL:
+        def __init__(self, opts: dict) -> None:
+            self.opts = opts
+            calls.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc) -> None:
+            return None
+
+        def extract_info(self, url: str, download: bool) -> dict:
+            if "extractor_args" not in self.opts:
+                raise DownloadError("HTTP Error 403: Forbidden")
+            (tmp_path / "video.mp4").write_bytes(b"x")
+            return {"ext": "mp4"}
+
+        def prepare_filename(self, info: dict) -> str:
+            return str(tmp_path / "video.mp4")
+
+    monkeypatch.setattr(fetch, "YoutubeDL", FakeYDL)
+    out = fetch.download_video("https://youtu.be/x", tmp_path)
+    assert out == tmp_path / "video.mp4"
+    assert len(calls) == 2 and calls[1]["extractor_args"]["youtube"]["player_client"] == ["mweb"]

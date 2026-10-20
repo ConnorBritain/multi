@@ -17,6 +17,33 @@ Given a YouTube URL and a timestamped transcript file, `multi` produces a direct
 
 Designed for tutorial/lecture content where the visual and the spoken word need to be reasoned about together.
 
+## Caption-first corpus processing
+
+`multi` can now emit text-only packs, discover channel uploads, and resume a batch.
+These paths use no paid model APIs. Local speech recognition is an optional extra.
+
+```sh
+# No video download, frame extraction, or OCR.
+uv run multi --url https://youtu.be/VIDEO_ID_HERE --transcript-only
+
+# Key-free, limited discovery across videos, Shorts, and streams.
+uv run multi catalog --channel @AlexHormozi --backend yt-dlp --limit 30 --out catalog.json
+
+# Default: text-only, one worker, cached successes, explicit failure ledger.
+uv run multi batch --input catalog.json --out output/pilot --workers 2
+
+# Local CPU transcription only when captions are genuinely absent.
+uv sync --extra whisper
+uv run --extra whisper multi batch --input catalog.json --out output/pilot --retry-failed -- --transcribe missing
+```
+
+The official catalog backend is the default and reads `YOUTUBE_API_KEY` from the
+environment. The key-free backend is best effort; its snapshot records incomplete
+enumerations and tab failures. Caption access can fail independently of discovery.
+
+See [the corpus guide](docs/corpus.md) for input formats, local audio, retry behavior,
+provenance, limits, and the free-first workflow.
+
 ## Requirements
 
 - Python 3.13 and [uv](https://docs.astral.sh/uv/)
@@ -291,4 +318,4 @@ uv sync
 uv run pytest
 ```
 
-Where this is going (local recordings, Whisper fallback, serving a pack as an MCP server): see [docs/roadmap.md](docs/roadmap.md).
+Further plans (general local recordings and serving a pack as an MCP server): see [docs/roadmap.md](docs/roadmap.md).

@@ -23,7 +23,10 @@ P0_FRAME_KEYS = {"idx": int, "t_seconds": (int, float), "image": str, "ocr": str
 def _run(fixture_video: Path, transcript: Path, out: Path, *extra: str) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     shutil.copy(fixture_video, out / "video.mp4")
-    # --no-fetch-cues keeps the suite offline; the fixture transcript has no cues.json.
+    # Keep every fixture run offline, including metadata lookups without a cache.
+    if not (out / "metadata.json").is_file():
+        extra = ("--no-metadata", *extra)
+    # The fixture transcript has no cues.json.
     assert cli.main(["--url", URL, "--transcript", str(transcript), "--out", str(out), "--no-fetch-cues", *extra]) == 0
     return json.loads((out / "paired.json").read_text(encoding="utf-8"))
 

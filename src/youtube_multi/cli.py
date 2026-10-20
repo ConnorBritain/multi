@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import sys
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from youtube_transcript_api._errors import (
 )
 
 from .align import align
-from .emit import build_manifest, frame_stats, write_index, write_json, write_manifest, write_markdown, write_skill
+from .emit import sha256_file, build_manifest, frame_stats, write_index, write_json, write_manifest, write_markdown, write_skill
 from .enrich import (
     classify_scene,
     configure_tesseract,
@@ -30,6 +32,7 @@ from .fetch import (
     cues_path_for,
     cues_to_chunks,
     download_video,
+    download_audio,
     fetch_cues_youtube,
     fetch_metadata,
     parse_transcript,
@@ -42,6 +45,8 @@ from .models import KINDS, Chunk, Cue, extract_video_id
 from .entities import build_glossary, write_entities
 from .navigate import assign_tiers, build_chapters, estimate_image_tokens, estimate_text_tokens, populate_chapters, score_frames
 from .reconstruct import reconstruct_all
+
+from .transcribe import read_source, save_transcript, transcribe_audio
 
 STEPS = 9
 
@@ -128,6 +133,17 @@ def build_parser() -> argparse.ArgumentParser:
     # Phase 4: reconstruction + entities
     ap.add_argument("--no-reconstruct", action="store_true", help="Skip reconstructed/ (code files and commands.sh from code/terminal frames)")
     ap.add_argument("--no-entities", action="store_true", help="Skip entities.md/json")
+    ap.add_argument("--transcript-only", action="store_true", help="Emit text packs without downloading/decoding video or running OCR")
+    ap.add_argument("--duration-seconds", type=float, help="Known source duration for supplied transcripts")
+    ap.add_argument("--transcribe", choices=["never", "missing", "always"], default="never",
+                    help="Opt-in local ASR: missing captions only, or prefer ASR even when captions exist (default: never)")
+    ap.add_argument("--audio-file", type=Path, help="Use local audio/video for ASR; requires --transcribe always")
+    ap.add_argument("--whisper-model", default="small.en", help="faster-whisper model name or local model directory")
+    ap.add_argument("--whisper-device", choices=["cpu", "cuda", "auto"], default="cpu")
+    ap.add_argument("--whisper-compute-type", default="int8")
+    ap.add_argument("--whisper-language", default="en", help="ASR language code, or auto")
+    ap.add_argument("--cpu-threads", type=int, default=4, help="CPU threads per ASR worker")
+    ap.add_argument("--local-model-only", action="store_true", help="Do not download ASR model weights")
     return ap
 
 
@@ -137,7 +153,10 @@ def _load_cues(
     """Raw cues from transcripts/<id>.cues.json, fetched if missing and allowed,
     else synthesized one-per-chunk. Returns (cues, source)."""
     cues_path = cues_path_for(transcript_path)
-    if cues_path.is_file():
+    source = read_source(transcript_path)
+    valid_cache = source["method"] != "edited" and (
+        not source.get("cues_sha256") or (cues_path.is_file() and source["cues_sha256"] == sha256_file(cues_path)))
+    if cues_path.is_file() and valid_cache:
         try:
             return read_cues_file(cues_path), f"file:{cues_path}"
         except (ValueError, KeyError, OSError) as e:
@@ -153,53 +172,84 @@ def _load_cues(
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"batch", "catalog"}:
+        if argv[0] == "batch":
+            from .batch import main as command
+        else:
+            from .catalog import main as command
+        return command(argv[1:])
     args = build_parser().parse_args(argv)
     try:
-        drop_kinds = parse_drop_kinds(args.drop)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
+        from .batch import batch_lock
+        args.out = args.out or Path("output") / extract_video_id(args.url)
+        args.out.mkdir(parents=True, exist_ok=True)
+        with batch_lock(args.out, ".pack.lock"):
+            return run(args)
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        # Network/provider failures remain visible and produce a failed batch job.
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 5
 
+
+def run(args: argparse.Namespace) -> int:
+    drop_kinds = parse_drop_kinds(args.drop)
+    if args.cpu_threads < 1 or not math.isfinite(args.chunk_seconds) or args.chunk_seconds < 0:
+        raise ValueError("cpu-threads must be positive and chunk-seconds must be finite and nonnegative")
+    if args.duration_seconds is not None and (not math.isfinite(args.duration_seconds) or args.duration_seconds <= 0):
+        raise ValueError("duration-seconds must be finite and positive")
+    if args.interval is not None and (not math.isfinite(args.interval) or args.interval <= 0):
+        raise ValueError("interval must be finite and positive")
+    if args.audio_file and args.transcribe != "always":
+        raise ValueError("--audio-file requires --transcribe always")
     video_id = extract_video_id(args.url)
     out_dir: Path = args.out or Path("output") / video_id
     frames_dir = out_dir / "frames"
     out_dir.mkdir(parents=True, exist_ok=True)
-
     transcript_path: Path = args.transcript or Path("transcripts") / f"{video_id}.txt"
     languages = args.lang or ["en", "en-US", "en-GB"]
-    if not transcript_path.is_file():
-        print(f"[0/{STEPS}] fetching captions for {video_id} (langs={','.join(languages)})")
+    needs_asr = args.transcribe == "always"
+    if not needs_asr and not transcript_path.is_file():
+        print(f"[0/{STEPS}] fetching captions for {video_id}")
         try:
             raw_cues = fetch_cues_youtube(video_id, languages)
-        except (TranscriptsDisabled, NoTranscriptFound) as e:
-            print(
-                f"\nNo YouTube captions available for {video_id} "
-                f"({type(e).__name__}). Provide a transcript file via --transcript "
-                f"or pick another --lang.",
-                file=sys.stderr,
-            )
-            return 3
-        except VideoUnavailable as e:
-            print(f"\nVideo unavailable: {e}", file=sys.stderr)
+            save_transcript(raw_cues, transcript_path, args.chunk_seconds,
+                            {"method": "youtube_captions", "timing": "caption_cues", "chunk_seconds": args.chunk_seconds, "api_cost_usd": 0})
+        except (TranscriptsDisabled, NoTranscriptFound) as exc:
+            if args.transcribe != "missing":
+                print(f"No captions ({type(exc).__name__}); supply --transcript or opt in with --transcribe missing", file=sys.stderr)
+                return 3
+            needs_asr = True
+        except VideoUnavailable as exc:
+            print(f"Video unavailable: {exc}", file=sys.stderr)
             return 4
-        chunks_to_save = aggregate_cues(cues_to_chunks(raw_cues), args.chunk_seconds)
-        write_transcript_file(chunks_to_save, transcript_path)
-        write_cues_file(raw_cues, cues_path_for(transcript_path))
-        print(f"      ->{len(raw_cues)} cues, saved {len(chunks_to_save)} chunks to {transcript_path} "
-              f"(raw cues in {cues_path_for(transcript_path).name})")
+    if needs_asr:
+        audio = args.audio_file or download_audio(args.url, out_dir)
+        transcribe_audio(audio, transcript_path, model_name=args.whisper_model,
+                         device=args.whisper_device, compute_type=args.whisper_compute_type,
+                         language=None if args.whisper_language == "auto" else args.whisper_language,
+                         cpu_threads=args.cpu_threads, chunk_seconds=args.chunk_seconds,
+                         local_files_only=args.local_model_only)
+    transcript_source = read_source(transcript_path)
+    if (transcript_source["method"] in {"youtube_captions", "faster_whisper"}
+            and transcript_source.get("chunk_seconds") != args.chunk_seconds):
+        cue_path = cues_path_for(transcript_path)
+        if cue_path.is_file() and transcript_source.get("cues_sha256") == sha256_file(cue_path):
+            transcript_source = save_transcript(read_cues_file(cue_path), transcript_path, args.chunk_seconds,
+                                               {**transcript_source, "chunk_seconds": args.chunk_seconds})
+    chunks = parse_transcript(transcript_path)
+    if not chunks:
+        raise ValueError(f"No timestamped transcript blocks found in {transcript_path}")
+    metadata = None if args.no_metadata else fetch_metadata(args.url, out_dir / "metadata.json")
+    if args.transcript_only:
+        return emit_text_pack(args, video_id, out_dir, transcript_path, chunks, languages, metadata, transcript_source)
 
     print(f"[1/{STEPS}] downloading video -> {out_dir}")
     video_path = download_video(args.url, out_dir)
     duration = video_duration(video_path)
-    metadata = None
-    if not args.no_metadata:
-        metadata = fetch_metadata(args.url, out_dir / "metadata.json")
-        if metadata is None:
-            print("  [warn] could not fetch metadata; chapters will be synthesized", file=sys.stderr)
-        else:
-            n_ch = len(metadata.get("chapters") or [])
-            print(f"      metadata: {metadata.get('title')!r}, {n_ch} chapters")
-
     if args.interval is not None:
         print(f"[2/{STEPS}] grabbing frames every {args.interval}s (interval mode)")
         scenes = extract_interval_frames(video_path, frames_dir, args.interval)
@@ -241,8 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[6/{STEPS}] diffs between consecutive same-kind frames ->{n_diffs}")
 
     print(f"[7/{STEPS}] parsing transcript: {transcript_path}")
-    chunks = parse_transcript(transcript_path)
-    cues, cue_source = _load_cues(video_id, transcript_path, chunks, languages, duration, allow_fetch=not args.no_fetch_cues)
+    cues, cue_source = _load_cues(video_id, transcript_path, chunks, languages, duration, allow_fetch=not args.no_fetch_cues and transcript_source["method"] not in {"faster_whisper", "edited"})
     print(f"      ->{len(chunks)} chunks, {len(cues)} cues ({cue_source})")
     align(kept, chunks, cues, duration)
 
@@ -270,7 +319,7 @@ def main(argv: list[str] | None = None) -> int:
     write_markdown(chunks, md_path, args.url, video_id)
     write_json(chunks, json_path, args.url, video_id, all_scenes=scenes, cues=cues,
                metadata=metadata, chapters=chapters, budget_info=budget_info,
-               reconstructed=reconstructed, entities_written=not args.no_entities)
+               reconstructed=reconstructed, entities_written=not args.no_entities, transcript_info=transcript_source)
     write_index(chapters, chunks, scenes, out_dir=out_dir, video_id=video_id, source_url=args.url,
                 metadata=metadata, duration=duration, budget_info=budget_info)
     write_skill(out_dir=out_dir, video_id=video_id, source_url=args.url, metadata=metadata, chapters=chapters,
@@ -284,6 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             source_url=args.url,
             video_path=video_path,
             ocr_enabled=not args.no_ocr,
+            transcript_info=transcript_source,
         ),
         manifest_path,
     )
@@ -297,6 +347,52 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  markdown: {md_path}")
     print(f"  json:     {json_path}")
     print(f"  manifest: {manifest_path}")
+    return 0
+
+
+def emit_text_pack(args, video_id, out_dir, transcript_path, chunks, languages, metadata, transcript_source) -> int:
+    metadata = dict(metadata or {})
+    known_duration = args.duration_seconds or metadata.get("duration") or transcript_source.get("duration")
+    estimate = float(known_duration or chunks[-1].start_seconds + max(args.chunk_seconds, 1))
+    cues, cue_source = _load_cues(video_id, transcript_path, chunks, languages, estimate,
+                                 allow_fetch=not args.no_fetch_cues and transcript_source["method"] not in {"faster_whisper", "edited"})
+    synthesized = cue_source.startswith("synthesized")
+    duration = max(float(known_duration or 0), max((c.end for c in cues), default=estimate))
+    metadata["duration"] = duration
+    transcript_source = {**transcript_source, "duration_source": "known" if known_duration else
+                         "estimated_from_chunks" if synthesized else "last_cue_end",
+                         "timing": "estimated" if synthesized else transcript_source.get("timing", "unknown"),
+                         "sentence_timing": "interpolated", "transcript_sha256": sha256_file(transcript_path)}
+    align([], chunks, cues, duration)
+    budget = assign_tiers([], None)
+    chapters = build_chapters(metadata, chunks, duration)
+    populate_chapters(chapters, chunks)
+    entities = [] if args.no_entities else build_glossary(chunks, cues, [])
+    if not args.no_entities:
+        write_entities(entities, out_dir, video_id)
+    write_markdown(chunks, out_dir / "paired.md", args.url, video_id)
+    write_json(chunks, out_dir / "paired.json", args.url, video_id, all_scenes=[], cues=cues,
+               metadata=metadata, chapters=chapters, budget_info=budget, entities_written=not args.no_entities,
+               transcript_info=transcript_source)
+    write_index(chapters, chunks, [], out_dir=out_dir, video_id=video_id, source_url=args.url,
+                metadata=metadata, duration=duration, budget_info=budget)
+    write_skill(out_dir=out_dir, video_id=video_id, source_url=args.url, metadata=metadata,
+                chapters=chapters, all_scenes=[], chunks=chunks, budget_info=budget, has_diffs=False,
+                n_entities=None if args.no_entities else len(entities))
+    # Stable evidence rows with explicit interval precision, ready for later indexing.
+    import hashlib
+    with (out_dir / "segments.jsonl").open("w", encoding="utf-8") as stream:
+        for cue in cues:
+            identity = json.dumps([video_id, cue.start, cue.end, cue.text], ensure_ascii=False)
+            row = {"id": hashlib.sha256(identity.encode()).hexdigest(), "video_id": video_id,
+                   "start": cue.start, "end": cue.end, "text": cue.text,
+                   "url": f"https://youtu.be/{video_id}?t={int(cue.start)}",
+                   "source_method": transcript_source["method"], "timing": transcript_source["timing"]}
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_manifest(build_manifest(args=vars(args), video_id=video_id, source_url=args.url,
+                                  video_path=None, ocr_enabled=False, transcript_info=transcript_source),
+                   out_dir / "manifest.json")
+    print(f"done. Text-only pack: {len(chunks)} chunks, {len(cues)} cues; no video/frame processing. {out_dir}")
     return 0
 
 

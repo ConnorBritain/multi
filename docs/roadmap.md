@@ -1,7 +1,10 @@
 # Roadmap: source-agnostic input and an MCP server over a pack
 
-Design notes only; nothing here is built yet. Both items build on invariants the
-current output already has, so they should be additive.
+Status update (October 2026): transcript-only packs, catalog discovery, resumable
+batches, and optional local Whisper transcription are implemented; see
+[corpus.md](corpus.md). The general Source protocol, arbitrary local-video packs,
+and MCP server described below remain design proposals. The local audio option
+currently requires an associated YouTube URL for source links.
 
 ## Invariants the current pack already gives us
 

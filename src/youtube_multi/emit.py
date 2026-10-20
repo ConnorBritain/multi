@@ -167,6 +167,7 @@ def write_json(
     budget_info: dict[str, Any] | None = None,
     reconstructed: list[Reconstructed] | None = None,
     entities_written: bool = False,
+    transcript_info: dict[str, Any] | None = None,
 ) -> None:
     out_dir = out_path.parent
     all_scenes = all_scenes if all_scenes is not None else [s for c in chunks for s in c.scenes]
@@ -183,6 +184,7 @@ def write_json(
         "description": metadata.get("description"),
         "duration": metadata.get("duration"),
         "channel": metadata.get("channel") or metadata.get("uploader"),
+        "transcript": transcript_info,
         "manifest": "manifest.json",
         "index": "index.json",
         "skill": "SKILL.md",
@@ -474,7 +476,7 @@ entities.md/json identifiers, commands, URLs, paths and product names with first
 
 # --- manifest -----------------------------------------------------------------
 
-_LIBS = ["yt-dlp", "scenedetect", "opencv-python", "numpy", "pytesseract", "pillow", "youtube-transcript-api"]
+_LIBS = ["yt-dlp", "scenedetect", "opencv-python", "numpy", "pytesseract", "pillow", "youtube-transcript-api", "faster-whisper"]
 
 
 def _lib_version(name: str) -> str | None:
@@ -530,6 +532,7 @@ def build_manifest(
     source_url: str,
     video_path: Path | None,
     ocr_enabled: bool,
+    transcript_info: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     video: dict[str, Any] | None = None
     if video_path is not None and video_path.is_file():
@@ -546,6 +549,7 @@ def build_manifest(
         "source_url": source_url,
         "args": _jsonable(args),
         "video": video,
+        "transcript": transcript_info,
         "libs": {name: _lib_version(name) for name in _LIBS},
         "tools": {
             "ffmpeg": _tool_version(["ffmpeg", "-version"]),

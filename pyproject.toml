@@ -12,6 +12,10 @@ dependencies = [
     "youtube-transcript-api>=1.0",
 ]
 
+[project.optional-dependencies]
+# PyAV 19 removed metadata_errors, still required by faster-whisper 1.2.
+whisper = ["faster-whisper>=1.2,<1.3", "av>=11,<19"]
+
 [project.scripts]
 multi = "youtube_multi.cli:main"
 

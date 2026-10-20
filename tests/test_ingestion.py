@@ -35,6 +35,7 @@ def test_text_pack_has_evidence_without_video_ocr_or_metadata(tmp_path, monkeypa
     assert rows[1]["url"].endswith("?t=4")
     assert json.loads((out / "manifest.json").read_text())["video"] is None
     assert not (out / "frames").exists()
+    assert "Entities: not generated" not in (out / "SKILL.md").read_text()
 
 
 def test_edited_transcript_does_not_reuse_stale_cues(tmp_path, monkeypatch):
@@ -198,6 +199,20 @@ def test_missing_api_key_does_not_call_network(tmp_path, monkeypatch):
     monkeypatch.delenv("MULTI_TEST_KEY", raising=False)
     monkeypatch.setattr(catalog, "_request", fail)
     assert catalog.main(["--channel", "@Example", "--out", str(tmp_path / "cat.json"), "--key-env", "MULTI_TEST_KEY"]) == 2
+
+
+@pytest.mark.parametrize("channel", ["https://www.youtube.com/c/SomeName",
+                                    "https://www.youtube.com/user/SomeName",
+                                    "https://www.youtube.com/watch?v=AAAAAAAAAAA", "UCinvalid"])
+@pytest.mark.parametrize("backend", ["api", "yt-dlp"])
+def test_invalid_channel_selector_cannot_catalog_the_wrong_channel(channel, backend, monkeypatch):
+    monkeypatch.setattr(catalog, "_request", fail)
+    monkeypatch.setattr(catalog, "YoutubeDL", fail)
+    with pytest.raises(ValueError, match="Use an @handle"):
+        if backend == "api":
+            catalog.inventory(channel, "unused")
+        else:
+            catalog.inventory_ytdlp(channel)
 
 
 def test_key_free_catalog_interleaves_formats_and_reports_partial(monkeypatch):

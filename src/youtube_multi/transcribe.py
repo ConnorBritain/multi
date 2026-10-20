@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import os
 from pathlib import Path
 
 from .emit import sha256_file
@@ -14,8 +15,17 @@ from .models import Cue
 def atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
     temp.replace(path)
+    if os.name != "nt":
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 def source_path_for(transcript: Path) -> Path:

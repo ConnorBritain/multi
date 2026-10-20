@@ -47,6 +47,8 @@ def inventory(channel: str, key: str, *, limit: int | None = None) -> dict:
             raise ValueError("Expected a YouTube channel URL, handle, or UC channel ID")
         parts = parsed.path.strip("/").split("/")
         value = parts[1] if parts[0] == "channel" and len(parts) > 1 else parts[0]
+    if not re.fullmatch(r"(?:@[\w.-]+|UC[\w-]{22})", value):
+        raise ValueError("Use an @handle, a /channel/UC… URL, or a UC channel ID")
     selector = {"id": value} if value.startswith("UC") else {"forHandle": value}
     response = _request("channels", {"part": "contentDetails,snippet,statistics", **selector}, key)
     channels = response.get("items", [])
@@ -116,7 +118,7 @@ def inventory_ytdlp(channel: str, *, limit: int | None = None) -> dict:
             raise ValueError("Expected a YouTube channel URL")
         parts = parsed.path.strip("/").split("/")
         value = parts[1] if parts[0] == "channel" and len(parts) > 1 else parts[0]
-    if not re.fullmatch(r"(?:@[\w.-]+|UC[\w-]+)", value):
+    if not re.fullmatch(r"(?:@[\w.-]+|UC[\w-]{22})", value):
         raise ValueError("Use an @handle or UC channel ID")
     base = f"https://www.youtube.com/{value}" if value.startswith("@") else f"https://www.youtube.com/channel/{value}"
     groups, warnings = [], []

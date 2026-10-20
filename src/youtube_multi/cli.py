@@ -367,8 +367,9 @@ def emit_text_pack(args, video_id, out_dir, transcript_path, chunks, languages, 
     budget = assign_tiers([], None)
     chapters = build_chapters(metadata, chunks, duration)
     populate_chapters(chapters, chunks)
+    entities = [] if args.no_entities else build_glossary(chunks, cues, [])
     if not args.no_entities:
-        write_entities(build_glossary(chunks, cues, []), out_dir, video_id)
+        write_entities(entities, out_dir, video_id)
     write_markdown(chunks, out_dir / "paired.md", args.url, video_id)
     write_json(chunks, out_dir / "paired.json", args.url, video_id, all_scenes=[], cues=cues,
                metadata=metadata, chapters=chapters, budget_info=budget, entities_written=not args.no_entities,
@@ -376,7 +377,8 @@ def emit_text_pack(args, video_id, out_dir, transcript_path, chunks, languages, 
     write_index(chapters, chunks, [], out_dir=out_dir, video_id=video_id, source_url=args.url,
                 metadata=metadata, duration=duration, budget_info=budget)
     write_skill(out_dir=out_dir, video_id=video_id, source_url=args.url, metadata=metadata,
-                chapters=chapters, all_scenes=[], chunks=chunks, budget_info=budget, has_diffs=False)
+                chapters=chapters, all_scenes=[], chunks=chunks, budget_info=budget, has_diffs=False,
+                n_entities=None if args.no_entities else len(entities))
     # Stable evidence rows with explicit interval precision, ready for later indexing.
     import hashlib
     with (out_dir / "segments.jsonl").open("w", encoding="utf-8") as stream:

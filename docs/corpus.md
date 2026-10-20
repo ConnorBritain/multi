@@ -156,7 +156,8 @@ video duration; a transcript without cue ends gets a marked estimate. Supply
 Access and redistribution permissions are separate from processing capabilities.
 Do not use blocked/private sources without authorization. Keep private source
 archives out of public code repositories. Corporate proxy users can configure a
-trusted CA with `SSL_CERT_FILE`; Multi honors it without turning off TLS checks.
+trusted CA with `SSL_CERT_FILE` (yt-dlp and the catalog API) and
+`REQUESTS_CA_BUNDLE` (caption fetching); neither turns off TLS checks.
 
 ## Primary references
 

@@ -4,3 +4,21 @@ __pycache__/
 output/
 *.mp4
 .uv-cache/
+
+# Local corpus outputs and credentials
+.env
+.env.*
+!.env.example
+*.m4a
+*.mp3
+*.wav
+*.flac
+*.webm
+*.mkv
+*.opus
+*.part
+.pytest_cache/
+/catalog*.json
+transcripts/*.cues.json
+transcripts/*.source.json
+transcripts/*.tmp

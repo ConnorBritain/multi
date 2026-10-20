@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -24,8 +25,14 @@ VIDEO_FORMAT = "bv*[height<=1080][vcodec^=avc1]/bv*[height<=1080]/b[height<=1080
 FALLBACK_PLAYER_CLIENTS = ("mweb",)
 
 
+def network_options() -> dict:
+    """Honor an explicitly configured CA bundle without disabling TLS verification."""
+    return {"compat_opts": {"no-certifi"}} if os.environ.get("SSL_CERT_FILE") else {}
+
+
 def _download_opts(out_dir: Path, player_client: str | None = None) -> dict:
     opts = {
+        **network_options(),
         "format": VIDEO_FORMAT,
         "outtmpl": str(out_dir / "video.%(ext)s"),
         "quiet": True,
@@ -64,6 +71,21 @@ def download_video(url: str, out_dir: Path) -> Path:
     return found[0]
 
 
+def download_audio(url: str, out_dir: Path) -> Path:
+    """Fetch audio only for an explicitly requested local transcription fallback."""
+    existing = sorted(p for p in out_dir.glob("audio.*") if p.suffix not in {".part", ".ytdl", ".json", ".tmp"})
+    if existing:
+        return existing[0]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with YoutubeDL({**network_options(), "format": "bestaudio/best", "outtmpl": str(out_dir / "audio.%(ext)s"),
+                    "quiet": True, "noprogress": True, "socket_timeout": 30, "retries": 2}) as ydl:
+        info = ydl.extract_info(url, download=True)
+        path = Path(ydl.prepare_filename(info))
+    if not path.is_file():
+        raise RuntimeError("Audio download did not produce a file")
+    return path
+
+
 # --- metadata --------------------------------------------------------------------
 
 _META_KEYS = ("id", "title", "description", "chapters", "duration", "upload_date", "channel", "uploader", "webpage_url")
@@ -77,7 +99,8 @@ def fetch_metadata(url: str, cache_path: Path) -> dict | None:
             return json.loads(cache_path.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             pass
-    opts = {"quiet": True, "no_warnings": True, "noprogress": True, "skip_download": True}
+    opts = {**network_options(), "quiet": True, "no_warnings": True, "noprogress": True, "skip_download": True,
+            "socket_timeout": 20, "retries": 1, "extractor_retries": 1}
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)

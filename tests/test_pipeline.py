@@ -11,7 +11,7 @@ import pytest
 
 from youtube_multi import cli
 
-from .conftest import SEGMENTS, tesseract_available
+from .conftest import SEGMENT_SECONDS, SEGMENTS, tesseract_available
 
 URL = "https://youtu.be/AAAAAAAAAAA"
 
@@ -97,6 +97,27 @@ def _check_index(out: Path, data: dict) -> dict:
         for idx in r["frames"]:
             assert idx in paired_frames
     return index
+
+
+def test_fixture_segments_are_not_perceptual_duplicates(fixture_video: Path) -> None:
+    """Every end-to-end count assumes one kept frame per segment; if a platform font puts two
+    segments within the default dedupe distance, those tests fail with a misleading count."""
+    import cv2
+
+    from youtube_multi.enrich import hamming, phash
+
+    threshold = cli.build_parser().get_default("dedupe_distance")
+    cap = cv2.VideoCapture(str(fixture_video))
+    hashes = []
+    for i in range(len(SEGMENTS)):
+        cap.set(cv2.CAP_PROP_POS_MSEC, (i + 0.5) * SEGMENT_SECONDS * 1000)
+        ok, img = cap.read()
+        assert ok
+        hashes.append(phash(img))
+    cap.release()
+    for i in range(len(hashes)):
+        for j in range(i + 1, len(hashes)):
+            assert hamming(hashes[i], hashes[j]) > threshold, (SEGMENTS[i][1], SEGMENTS[j][1])
 
 
 @pytest.mark.parametrize("ocr", [pytest.param(False, id="noocr"), pytest.param(True, id="ocr", marks=pytest.mark.skipif(not tesseract_available(), reason="no tesseract"))])

@@ -12,6 +12,10 @@ import pytest
 # large label, so scene detection and OCR both have something to find.
 # Colours are chosen so consecutive pairs differ in saturation/value, not just
 # hue (ContentDetector averages H/S/V deltas; hue-only changes score too low).
+# Each label sits at its own height: pHash is grayscale layout only, and
+# same-position labels can land within the dedupe threshold depending on the
+# font (macOS Arial Bold put BRAVO/CHARLIE at distance 6, the default dedupe
+# threshold), which merged frames. Staggered, the minimum is ~28 across fonts.
 SEGMENTS = [
     ("white", "ALPHA ONE"),
     ("yellow", "BRAVO TWO"),
@@ -49,7 +53,7 @@ def build_fixture_video(target: Path) -> Path:
     for i, (_, label) in enumerate(SEGMENTS):
         chains.append(
             f"[{i}]drawtext={font}text='{label}':fontsize=36:fontcolor=black:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2[v{i}]"
+            f"x=(w-text_w)/2:y={i + 1}*h/{len(SEGMENTS) + 1}-text_h/2[v{i}]"
         )
     inputs = "".join(f"[v{i}]" for i in range(len(SEGMENTS)))
     chains.append(f"{inputs}concat=n={len(SEGMENTS)}:v=1:a=0[out]")

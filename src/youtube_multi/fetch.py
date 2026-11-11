@@ -44,13 +44,14 @@ def _download_opts(out_dir: Path, player_client: str | None = None) -> dict:
     return opts
 
 
-def download_video(url: str, out_dir: Path) -> Path:
+def download_video(url: str, out_dir: Path, youtube: bool = True) -> Path:
     existing = sorted(p for p in out_dir.glob("video.*") if not p.name.endswith((".part", ".ytdl")))
     if existing:
         print(f"  [skip] {existing[0].name} already exists")
         return existing[0]
     out_dir.mkdir(parents=True, exist_ok=True)
-    attempts: list[str | None] = [None, *FALLBACK_PLAYER_CLIENTS]
+    # The player-client fallback is a YouTube workaround; other sites get a single attempt.
+    attempts: list[str | None] = [None, *FALLBACK_PLAYER_CLIENTS] if youtube else [None]
     for i, client in enumerate(attempts):
         try:
             with YoutubeDL(_download_opts(out_dir, client)) as ydl:

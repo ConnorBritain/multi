@@ -2,9 +2,9 @@
 
 Status update (October 2026): transcript-only packs, catalog discovery, resumable
 batches, and optional local Whisper transcription are implemented; see
-[corpus.md](corpus.md). The general Source protocol, arbitrary local-video packs,
-and MCP server described below remain design proposals. The local audio option
-currently requires an associated YouTube URL for source links.
+[corpus.md](corpus.md). Source-agnostic input (`--source` with local files, Vimeo, Wistia and other
+yt-dlp URLs, plus `--audio-file` for split downloads) is implemented in `source.py`; sidecar
+`.vtt`/`.srt` parsing, ffprobe chapters, Loom/Teams cookies and the MCP server remain proposals.
 
 ## Invariants the current pack already gives us
 
@@ -14,44 +14,27 @@ currently requires an associated YouTube URL for source links.
 
 ## 1. Source-agnostic input
 
-### Goal
+### Shipped (November 2026)
 
-`multi --source <PATH|URL>` accepts a local `.mp4`/`.mkv`/`.mov`, a Loom share link, a Microsoft Teams / SharePoint / Stream recording, or a YouTube URL, and produces the same pack. `--url` stays as an alias for YouTube.
+`multi --source <PATH|URL>` (`--url` is an alias) accepts a local video file, a YouTube URL, a Vimeo or Wistia
+URL, or any other URL yt-dlp can fetch. `source.py` holds a frozen `Source` dataclass with `kind`
+(`youtube | vimeo | wistia | url | local`), `id`, `url`, `path` and `link(seconds)`; the writers take the
+`Source` and nothing else in the pipeline knows the provider.
 
-### Shape
+- Ids: YouTube video id; `vimeo-<n>`; `wistia-<hash>`; `<host-slug>-<8 hex of the URL>`; local files
+  `<file-name-slug>-<8 hex of size + first MiB>`.
+- Deep links: `youtu.be/<id>?t=<s>`, Vimeo `#t=<s>s`, Wistia `?wtime=<s>s`; generic URLs and local files get
+  `None`, so markdown shows plain `▶ HH:MM:SS` and JSON `url` fields are `null`.
+- Captions are fetched only for YouTube. Other sources need `--transcript` or `--transcribe missing|always`
+  (faster-whisper); `--audio-file` supplies a separate audio track for split downloads.
+- `manifest.json` gains a `source` block (`kind`, `id`, `url`, `path`, `audio_file`, `linkable`).
+- Every run writes `agent/` (README, transcript with slide markers, slides.md/json, slides/) for agents.
 
-A small `Source` protocol in `fetch.py`, with one implementation per kind:
+### Still planned
 
-```python
-class Source(Protocol):
-    id: str                                   # stable id used for output/<id>/ and transcripts/<id>.*
-    display_url: str | None                   # what deep links point at, or None
-    def video_path(self, out_dir: Path) -> Path: ...          # download or copy-in
-    def cues(self, languages: list[str]) -> list[Cue] | None: ...  # captions if the source has them, else None
-    def metadata(self) -> dict | None: ...    # title / description / chapters / duration when available
-    def deep_link(self, seconds: float) -> str | None: ...
-```
-
-- `YouTubeSource`: the current code, moved behind the protocol.
-- `LocalFileSource`: `id` = first 12 hex chars of the file's sha256 (already computed for the manifest); `video_path` copies or symlinks the file into the pack; `cues()` looks for a sidecar `.vtt`/`.srt` next to the file (Zoom, OBS and Teams exports produce these) and parses it; `metadata()` reads container tags via ffprobe (`title`, `comment`, chapters from `-show_chapters`); `deep_link` returns `None`, and emit falls back to plain `HH:MM:SS` text where a link would have been.
-- `LoomSource`, `TeamsSource`: yt-dlp's generic extractor already handles Loom share pages and many SharePoint/Stream URLs when a cookie file is supplied, so these are thin `YouTubeSource` variants that pass `--cookies-from-browser` / `--cookies` through and use the page's own URL for deep links (Loom supports `?t=<seconds>`; Stream supports `&st=<seconds>`). If yt-dlp cannot fetch the page, fall back to asking for a downloaded file (`LocalFileSource`).
-- `deep_link` and `id` live on the source so nothing else in the pipeline changes; `manifest.json` gains a `source` block (`kind`, original path/URL, sha256).
-
-### Whisper fallback when no captions exist
-
-When `cues()` returns `None` and no `transcripts/<id>.txt` exists, transcribe locally:
-
-- Dependency: `faster-whisper` as an optional extra (`uv sync --extra whisper`); it is CTranslate2-based, runs on CPU acceptably for `small`/`base`, and returns word- or segment-level timestamps that map directly onto `Cue(start, duration, text)`. Never a hard dependency: the base install stays pure-Python + ffmpeg + tesseract.
-- Audio is extracted once with ffmpeg (`-vn -ac 1 -ar 16000 -f wav`), transcribed with a configurable `--whisper-model` (default `small`) and `--lang`, and the segments are written as the same `transcripts/<id>.cues.json` + aggregated `.txt` the YouTube path writes. Everything downstream is unchanged, and re-runs are cached exactly like fetched captions.
-- The manifest records the model name, compute type and that the transcript is machine-generated; `SKILL.md` adds a caveat line so the agent knows the transcript is Whisper output rather than author-provided captions.
-- Word-level timestamps, when available, replace the character-proportional sentence timing in `align.time_sentences` with exact sentence starts; the function already takes cues, so this is a precision upgrade, not a redesign.
-
-### Order of work
-
-1. Extract `Source` protocol and `YouTubeSource` (no behaviour change; tests keep passing).
-2. `LocalFileSource` with `.vtt`/`.srt` sidecars and ffprobe metadata; the pytest fixture video becomes a first-class input, which also lets the e2e test run without network.
-3. `faster-whisper` extra and the audio path.
-4. Loom / Teams via yt-dlp with cookies; document the cookie requirement.
+- Sidecar `.vtt`/`.srt` next to a local file as its transcript, and ffprobe container tags / chapters as metadata.
+- Loom / Teams / Stream via yt-dlp with `--cookies-from-browser`, using each page's own time parameter.
+- Word-level ASR timestamps replacing character-proportional sentence timing in `align.time_sentences`.
 
 ## 2. Serving a pack as an MCP server
 

@@ -12,9 +12,18 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
-from .models import Chunk, Cue, Scene, deep_link, hms
+from .models import Chunk, Cue, Scene, hms, md_link
 from .navigate import Chapter, chapter_json, estimate_text_tokens
 from .reconstruct import Reconstructed
+from .source import Source
+
+def _source(video_id: str, source: Source | None) -> Source:
+    """The caller's Source, or a YouTube source for video_id (what callers without one always got)."""
+    return source or Source("youtube", video_id, None)
+
+
+def _play(link, seconds: float, label: str | None = None) -> str:
+    return md_link(f"▶ {label or hms(seconds)}", link(seconds))
 
 
 def _rel(path: Path | None, out_dir: Path) -> str | None:
@@ -26,13 +35,13 @@ def _rel(path: Path | None, out_dir: Path) -> str | None:
         return path.as_posix()
 
 
-def _scene_md_lines(scene: Scene, out_dir: Path, video_id: str) -> list[str]:
+def _scene_md_lines(scene: Scene, out_dir: Path, link) -> list[str]:
     rel = _rel(scene.image_path, out_dir)
     lines = [f"![scene {scene.idx:04d} @ {hms(scene.t_seconds)}]({rel})"]
     meta = f"> kind: {scene.kind} ({scene.kind_confidence:.2f})"
     if scene.visible_to > scene.visible_from:
         meta += f" · visible {hms(scene.visible_from)}–{hms(scene.visible_to)}"
-    meta += f" · [▶ {hms(scene.t_seconds)}]({deep_link(video_id, scene.t_seconds)})"
+    meta += f" · {_play(link, scene.t_seconds)}"
     lines.append(meta)
     if scene.ocr:
         lines.append(f"> OCR: {scene.ocr}")
@@ -55,10 +64,13 @@ def write_markdown(
     out_path: Path,
     source_url: str,
     video_id: str,
+    source: Source | None = None,
 ) -> None:
     out_dir = out_path.parent
+    src = _source(video_id, source)
+    link = src.link
     lines: list[str] = [
-        f"# YouTube paired transcript — {video_id}",
+        f"# {'YouTube paired' if src.is_youtube else 'Paired'} transcript — {video_id}",
         "",
         f"Source: {source_url}",
         "",
@@ -69,19 +81,19 @@ def write_markdown(
         # Heading line kept exactly as in the original format; the deep link sits below it.
         lines.append(f"## {hms(chunk.start_seconds)}")
         lines.append("")
-        lines.append(f"[▶ {hms(chunk.start_seconds)}]({deep_link(video_id, chunk.start_seconds)})")
+        lines.append(_play(link, chunk.start_seconds))
         lines.append("")
-        lines.extend(_chunk_body_md(chunk, out_dir, video_id))
+        lines.extend(_chunk_body_md(chunk, out_dir, link))
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def _chunk_body_md(chunk: Chunk, out_dir: Path, video_id: str) -> list[str]:
+def _chunk_body_md(chunk: Chunk, out_dir: Path, link) -> list[str]:
     """Transcript sentences with each frame inserted after the sentence it
     appeared during (frames before the first sentence come first)."""
     if not chunk.sentences:
         lines = [chunk.text, ""]
         for scene in chunk.scenes:
-            lines.extend(_scene_md_lines(scene, out_dir, video_id))
+            lines.extend(_scene_md_lines(scene, out_dir, link))
         return lines
 
     by_sentence: dict[int, list[Scene]] = {}
@@ -90,7 +102,7 @@ def _chunk_body_md(chunk: Chunk, out_dir: Path, video_id: str) -> list[str]:
 
     lines: list[str] = []
     for scene in by_sentence.get(-1, []):
-        lines.extend(_scene_md_lines(scene, out_dir, video_id))
+        lines.extend(_scene_md_lines(scene, out_dir, link))
     paragraph: list[str] = []
     for sentence in chunk.sentences:
         paragraph.append(sentence.text)
@@ -100,18 +112,18 @@ def _chunk_body_md(chunk: Chunk, out_dir: Path, video_id: str) -> list[str]:
             lines.append("")
             paragraph = []
             for scene in scenes_here:
-                lines.extend(_scene_md_lines(scene, out_dir, video_id))
+                lines.extend(_scene_md_lines(scene, out_dir, link))
     if paragraph:
         lines.append(" ".join(paragraph))
         lines.append("")
     return lines
 
 
-def _frame_json(s: Scene, out_dir: Path, video_id: str) -> dict[str, Any]:
+def _frame_json(s: Scene, out_dir: Path, link) -> dict[str, Any]:
     d: dict[str, Any] = {
         "idx": s.idx,
         "t_seconds": round(s.t_seconds, 2),
-        "url": deep_link(video_id, s.t_seconds),
+        "url": link(s.t_seconds),
         "image": _rel(s.image_path, out_dir),
         "ocr": s.ocr,
         "ocr_lines": s.ocr_lines,
@@ -168,8 +180,10 @@ def write_json(
     reconstructed: list[Reconstructed] | None = None,
     entities_written: bool = False,
     transcript_info: dict[str, Any] | None = None,
+    source: Source | None = None,
 ) -> None:
     out_dir = out_path.parent
+    link = _source(video_id, source).link
     all_scenes = all_scenes if all_scenes is not None else [s for c in chunks for s in c.scenes]
     cues = cues if cues is not None else [cue for c in chunks for cue in c.cues]
     metadata = metadata or {}
@@ -203,7 +217,7 @@ def write_json(
         ],
         "budget": budget_info or {"budget": None},
         "chapters": [
-            {k: v for k, v in chapter_json(ch, chunks, video_id, deep_link).items() if k != "visual_states"}
+            {k: v for k, v in chapter_json(ch, chunks, link).items() if k != "visual_states"}
             for ch in (chapters or [])
         ],
         "frame_stats": frame_stats(all_scenes),
@@ -211,15 +225,15 @@ def write_json(
             {
                 "start_seconds": c.start_seconds,
                 "start_hms": hms(c.start_seconds),
-                "url": deep_link(video_id, c.start_seconds),
+                "url": link(c.start_seconds),
                 "text": c.text,
                 "sentences": [
-                    {"index": s.index, "start": s.start, "url": deep_link(video_id, s.start), "text": s.text}
+                    {"index": s.index, "start": s.start, "url": link(s.start), "text": s.text}
                     for s in c.sentences
                 ],
                 "cue_ids": [cue.id for cue in c.cues],
                 "frames": [
-                    {**_frame_json(s, out_dir, video_id), "reconstructed": frame_to_recon.get(s.idx, [])}
+                    {**_frame_json(s, out_dir, link), "reconstructed": frame_to_recon.get(s.idx, [])}
                     for s in c.scenes
                 ],
             }
@@ -230,7 +244,7 @@ def write_json(
                 "id": cue.id,
                 "start": round(cue.start, 3),
                 "duration": round(cue.duration, 3),
-                "url": deep_link(video_id, cue.start),
+                "url": link(cue.start),
                 "text": cue.text,
             }
             for cue in cues
@@ -269,8 +283,10 @@ def write_index(
     metadata: dict[str, Any] | None,
     duration: float,
     budget_info: dict[str, Any],
+    source: Source | None = None,
 ) -> None:
     metadata = metadata or {}
+    link = _source(video_id, source).link
     title = metadata.get("title") or video_id
     kept = [s for s in all_scenes if s.kept]
     stats = frame_stats(all_scenes)
@@ -280,7 +296,7 @@ def write_index(
 
     ch_json = []
     for ch in chapters:
-        d = chapter_json(ch, chunks, video_id, deep_link)
+        d = chapter_json(ch, chunks, link)
         for vs, s in zip(d["visual_states"], ch.frames):
             vs["image"] = _rel(s.image_path, out_dir)
         ch_json.append(d)
@@ -318,7 +334,7 @@ def write_index(
     ]
     for ch, d in zip(chapters, ch_json):
         lines.append(
-            f"| {ch.index + 1} | [{ch.title}](#{_anchor(ch)}) | [{_fmt_range(ch.start, ch.end)}]({d['url']}) | "
+            f"| {ch.index + 1} | [{ch.title}](#{_anchor(ch)}) | {md_link(_fmt_range(ch.start, ch.end), d['url'])} | "
             f"{len(ch.chunk_indices)} | {len(ch.frames)} | {ch.tokens_text:,} / {ch.tokens_images:,} | {d['tokens_tier1']:,} |"
         )
     lines.append("")
@@ -326,7 +342,7 @@ def write_index(
         lines.append(f"## {ch.index + 1}. {ch.title}")
         lines.append("")
         chunk_refs = ", ".join(f"`## {hms(chunks[i].start_seconds)}`" for i in ch.chunk_indices) or "none"
-        lines.append(f"[▶ {_fmt_range(ch.start, ch.end)}]({d['url']}) · paired.md sections: {chunk_refs}")
+        lines.append(f"{_play(link, ch.start, _fmt_range(ch.start, ch.end))} · paired.md sections: {chunk_refs}")
         lines.append("")
         if not ch.frames:
             lines.append("_No frames kept in this chapter._")
@@ -337,7 +353,7 @@ def write_index(
         for vs, s in zip(d["visual_states"], ch.frames):
             heading = vs["heading"].replace("|", "\\|")
             lines.append(
-                f"| {s.idx:04d} | [{hms(s.t_seconds)}]({vs['url']}) | {s.kind} ({s.kind_confidence:.2f}) | {heading} | "
+                f"| {s.idx:04d} | {md_link(hms(s.t_seconds), vs['url'])} | {s.kind} ({s.kind_confidence:.2f}) | {heading} | "
                 f"{_fmt_range(s.visible_from, s.visible_to)} | {s.tokens_est:,} | {s.tier} | [{Path(vs['image']).name}]({vs['image']}) |"
             )
         lines.append("")
@@ -368,10 +384,18 @@ def write_skill(
     has_diffs: bool,
     reconstructed: list[Reconstructed] | None = None,
     n_entities: int | None = None,
+    source: Source | None = None,
 ) -> None:
     metadata = metadata or {}
+    src = _source(video_id, source)
     title = metadata.get("title") or video_id
     reconstructed = reconstructed or []
+    sample = src.link(0)
+    url_line = (
+        f"- `url`: a deep link to the moment (e.g. `{sample}` is 0 s) — cite these when pointing at a moment."
+        if sample
+        else "- `url`: null — this source has no linkable timeline; cite moments as HH:MM:SS (seconds into the video)."
+    )
     recon_line = (
         f"- Reconstructed text: {len(reconstructed)} file(s) in reconstructed/ ("
         + ", ".join(f"{r.path.name} from {len(r.frame_idxs)} frame(s), confidence {r.confidence:.2f}" for r in reconstructed)
@@ -395,7 +419,7 @@ def write_skill(
     )
     body = f"""---
 name: video-context-pack-{video_id}
-description: Context pack for the YouTube video "{title}" ({video_id}) — transcript, deduplicated and classified frames, OCR, frame diffs, chapters and token estimates. Read this file first, then index.md.
+description: Context pack for the {src.noun} "{title}" ({video_id}) — transcript, deduplicated and classified frames, OCR, frame diffs, chapters and token estimates. Read this file first, then index.md.
 ---
 
 # How to read this context pack
@@ -447,7 +471,7 @@ entities.md/json identifiers, commands, URLs, paths and product names with first
   near-duplicates were collapsed into it (`frame_stats.duplicates`).
 - `sentence_index`: which sentence of the chunk was being spoken when the frame appeared (-1 = before the
   chunk's first sentence). `cue_ids_visible`: raw caption cues (paired.json `cues`) spoken while it was visible.
-- `url`: a `https://youtu.be/{video_id}?t=<seconds>` deep link — cite these when pointing at a moment.
+{url_line}
 - `ocr` / `ocr_lines` / `ocr_confidence`: Tesseract output (flat, per line, mean word confidence 0–100).
   Expect noise on small or stylised text.
 - `tokens_est`: approximate cost of the image (≈ width×height/750, capped) plus its OCR text.
@@ -533,6 +557,7 @@ def build_manifest(
     video_path: Path | None,
     ocr_enabled: bool,
     transcript_info: dict[str, Any] | None = None,
+    source: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     video: dict[str, Any] | None = None
     if video_path is not None and video_path.is_file():
@@ -547,6 +572,7 @@ def build_manifest(
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "video_id": video_id,
         "source_url": source_url,
+        "source": source,
         "args": _jsonable(args),
         "video": video,
         "transcript": transcript_info,

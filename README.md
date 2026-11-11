@@ -1,9 +1,10 @@
 # multi
 
-Turn a YouTube video into a curated context pack an LLM agent can navigate: deduplicated, classified frames paired with the timestamped transcript, plus the derived data an agent can't compute well on its own (frame diffs, frame kinds, OCR).
+Turn a video (YouTube, Vimeo, Wistia, any other yt-dlp URL, or a local file) into a curated context pack an LLM agent can navigate: deduplicated, classified frames paired with the timestamped transcript, plus the derived data an agent can't compute well on its own (frame diffs, frame kinds, OCR).
 
 Given a YouTube URL and a timestamped transcript file, `multi` produces a directory containing:
 
+- `agent/` — a small fixed-shape bundle for agents: `README.md`, `transcript.md` (with slide markers), `slides.md`/`slides.json`, and `slides/NNN_HH-MM-SS.jpg`
 - `SKILL.md` — how to read the pack and in what order; the file to hand an agent first
 - `index.md` / `index.json` — chapters (from YouTube metadata, or synthesized) → visual states (one row per kept frame: kind, OCR heading, time range, tier) with token estimates per chapter and per frame
 - `frames/` — JPGs captured either at scene-change moments or at a fixed time interval, with near-duplicates and talking-head shots removed
@@ -83,6 +84,34 @@ uv run multi --url <URL> --interval 0.5 --no-ocr
 
 Output lands in `output/<video_id>/` by default, or pass `--out <path>` to override.
 
+### Other sources and local files
+
+`--source` accepts a local video path or any URL yt-dlp can fetch (`--url` is an alias). YouTube is the only
+source with a caption API, so other sources need a transcript (`--transcript`) or local ASR (`--transcribe missing`).
+
+```sh
+# Vimeo / Wistia: deep links use #t=<s>s and ?wtime=<s>s
+uv run --extra whisper multi --source https://vimeo.com/76979871 --transcribe missing
+
+# A split download: silent video file + separate audio file
+uv run --extra whisper multi --source "talk (No Audio).mp4" --audio-file "talk-audio.m4a" \
+  --transcribe missing --interval 1 --out "output/talk"
+```
+
+Local files get the id `<file-name-slug>-<8 hex>` and no deep links: times appear as plain `▶ HH:MM:SS` and
+`url` fields are `null`. `manifest.json` records the source kind, path or URL, and any `--audio-file`.
+
+### The agent bundle
+
+Every run also writes `agent/`, the folder to hand an agent that needs the content, not the pipeline data:
+`README.md`, `transcript.md` (`## HH:MM:SS` blocks with `→ slide NNN` markers), `slides.md` / `slides.json`
+(each visual with its time on screen, OCR and the speech while it was visible) and `slides/`. Talking-head
+frames are left out. `--no-bundle` skips it.
+`agent/` is rebuilt from scratch on each run, so do not hand-edit it in place.
+
+Wistia links are recognised on `*.wistia.com/medias/<id>` and `fast.wistia.net/embed/...` URLs; a Wistia video on
+a custom domain is treated as a generic URL (it still downloads, but gets no deep links).
+
 ### Transcript handling
 
 On every run, `multi` looks for `transcripts/<video_id>.txt` (or whatever `--transcript` points at):
@@ -137,7 +166,9 @@ After extraction every frame goes through four cheap passes (no models, no netwo
 
 ## Flags
 
-- `--url URL` (required) — YouTube URL
+- `--source PATH|URL` (or `--url`, required) — local video file, or a YouTube / Vimeo / Wistia / other yt-dlp URL
+- `--audio-file PATH` — local audio for ASR (e.g. the audio half of a split download); needs `--transcribe missing|always`
+- `--no-bundle` — skip `agent/`
 - `--transcript PATH` — path to a transcript `.txt` (default: `transcripts/<video_id>.txt`, auto-fetched if missing)
 - `--out PATH` — output directory (default: `output/<video_id>`)
 - `--lang LANG` — caption language to try when auto-fetching; repeat for fallbacks (default: `en`, `en-US`, `en-GB`)

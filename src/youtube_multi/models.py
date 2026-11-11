@@ -108,3 +108,8 @@ def short_ms(seconds: float) -> str:
 
 def deep_link(video_id: str, seconds: float) -> str:
     return f"https://youtu.be/{video_id}?t={int(seconds)}"
+
+
+def md_link(label: str, url: str | None) -> str:
+    """Markdown link, or the bare label when the source has no linkable timeline."""
+    return f"[{label}]({url})" if url else label

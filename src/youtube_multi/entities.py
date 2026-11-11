@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .models import Chunk, Cue, Scene, deep_link, hms
+from .models import Chunk, Cue, Scene, hms, md_link
+from .source import Source
 from .reconstruct import extract_commands
 
 _URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s<>\"')\]]+|\b[\w-]+(?:\.[\w-]+)+\.(?:com|org|io|dev|net|ai|co|app|sh)(?:/[^\s<>\"')\]]*)?", re.I)
@@ -145,7 +146,8 @@ def build_glossary(chunks: list[Chunk], cues: list[Cue], scenes: list[Scene]) ->
     return out
 
 
-def write_entities(entities: list[Entity], out_dir: Path, video_id: str) -> None:
+def write_entities(entities: list[Entity], out_dir: Path, video_id: str, source: Source | None = None) -> None:
+    link = (source or Source("youtube", video_id, None)).link
     payload: list[dict[str, Any]] = []
     for e in entities:
         payload.append({
@@ -153,9 +155,9 @@ def write_entities(entities: list[Entity], out_dir: Path, video_id: str) -> None
             "type": e.type,
             "mentions": e.mentions,
             "first_spoken": e.first_spoken,
-            "first_spoken_url": deep_link(video_id, e.first_spoken) if e.first_spoken is not None else None,
+            "first_spoken_url": link(e.first_spoken) if e.first_spoken is not None else None,
             "first_on_screen": e.first_on_screen,
-            "first_on_screen_url": deep_link(video_id, e.first_on_screen) if e.first_on_screen is not None else None,
+            "first_on_screen_url": link(e.first_on_screen) if e.first_on_screen is not None else None,
             "first_frame": e.first_frame,
             "frames": e.frames,
             "spoken_in_chunks": e.spoken_in_chunks,
@@ -173,9 +175,9 @@ def write_entities(entities: list[Entity], out_dir: Path, video_id: str) -> None
     ]
     for e in entities:
         name = e.name.replace("|", "\\|")
-        spoken = f"[{hms(e.first_spoken)}]({deep_link(video_id, e.first_spoken)})" if e.first_spoken is not None else "–"
+        spoken = md_link(hms(e.first_spoken), link(e.first_spoken)) if e.first_spoken is not None else "–"
         screen = (
-            f"[{hms(e.first_on_screen)}]({deep_link(video_id, e.first_on_screen)}) (frame {e.first_frame:04d})"
+            f"{md_link(hms(e.first_on_screen), link(e.first_on_screen))} (frame {e.first_frame:04d})"
             if e.first_on_screen is not None else "–"
         )
         frames = ", ".join(f"{i:04d}" for i in e.frames[:6]) + (" …" if len(e.frames) > 6 else "") or "–"

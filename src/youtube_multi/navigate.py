@@ -179,13 +179,14 @@ def populate_chapters(chapters: list[Chapter], chunks: list[Chunk]) -> None:
         ch.frames.sort(key=lambda s: s.t_seconds)
 
 
-def chapter_json(ch: Chapter, chunks: list[Chunk], video_id: str, deep_link) -> dict[str, Any]:
+def chapter_json(ch: Chapter, chunks: list[Chunk], link) -> dict[str, Any]:
+    """`link(seconds)` returns a deep link or None."""
     return {
         "index": ch.index,
         "title": ch.title,
         "start": round(ch.start, 2),
         "end": round(ch.end, 2),
-        "url": deep_link(video_id, ch.start),
+        "url": link(ch.start),
         "source": ch.source,
         "chunk_ids": ch.chunk_indices,
         "chunk_starts": [chunks[i].start_seconds for i in ch.chunk_indices],
@@ -200,7 +201,7 @@ def chapter_json(ch: Chapter, chunks: list[Chunk], video_id: str, deep_link) -> 
                 "heading": frame_heading(s),
                 "visible_from": round(s.visible_from, 2),
                 "visible_to": round(s.visible_to, 2),
-                "url": deep_link(video_id, s.t_seconds),
+                "url": link(s.t_seconds),
                 "tokens_est": s.tokens_est,
                 "score": s.score,
                 "tier": s.tier,

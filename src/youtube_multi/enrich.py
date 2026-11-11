@@ -223,6 +223,25 @@ _CODE_TOKEN_RE = re.compile(
 _PROMPT_RE = re.compile(r"^(\$|>|❯|»|%|#|~|PS [A-Z]:\\|[\w.-]+@[\w.-]+:|[\w~/.-]*\$)\s")
 
 
+def _face_strip_frac(faces, w: int, h: int) -> float:
+    """Depth of the narrowest frame-edge band that holds every face, as a fraction
+    of that dimension (1.0 when there are no faces).
+
+    Each face is padded by its own width/height to approximate its webcam tile.
+    Video-call shares stack small tiles along one edge (low value); gallery view
+    and real talking heads spread faces across the frame (high value).
+    """
+    if len(faces) == 0:
+        return 1.0
+    x0 = min(x - fw for x, _, fw, _ in faces)
+    x1 = max(x + 2 * fw for x, _, fw, _ in faces)
+    y0 = min(y - fh for _, y, _, fh in faces)
+    y1 = max(y + 2 * fh for _, y, _, fh in faces)
+    left, right = x1 / w, (w - x0) / w
+    top, bottom = y1 / h, (h - y0) / h
+    return float(_clamp(min(left, right, top, bottom)))
+
+
 def image_features(img: np.ndarray) -> dict[str, float]:
     """Cheap visual features: faces, luminance/saturation stats, edges, lines, boxes."""
     h, w = img.shape[:2]
@@ -246,6 +265,7 @@ def image_features(img: np.ndarray) -> dict[str, float]:
     )
     f["n_faces"] = float(len(faces))
     f["face_frac"] = float(max((fw * fh for _, _, fw, fh in faces), default=0) / float(small.shape[0] * small.shape[1]))
+    f["face_strip_frac"] = _face_strip_frac(faces, small.shape[1], small.shape[0])
 
     edges = cv2.Canny(gray, 80, 200)
     f["edge_density"] = float((edges > 0).mean())
@@ -300,14 +320,30 @@ def classify_features(f: dict[str, float]) -> tuple[str, float]:
     dark = g("dark_frac", 0.0)
     light = g("light_frac", 0.0)
     has_face = g("n_faces", 0.0) >= 1
+    # Small faces packed into a band along one edge are webcam tiles beside a
+    # shared screen: the screen, not the faces, is the frame's content. Ramps from
+    # 0 at a 45%-deep band to 1 at 30%; faces over 4.5% of the frame (a real
+    # presenter framed off to one side) never count, whatever their position.
+    # Faces up to 3% count fully, so mid-size webcam panels are not split between
+    # talking-head and slide (where talking-head would win and get dropped).
+    small_faces = 1.0 - _clamp((g("face_frac", 0.0) - 0.03) / 0.015)
+    sidebar = _clamp((0.45 - g("face_strip_frac", 1.0)) / 0.15) * small_faces if has_face else 0.0
+    face_w = _clamp(g("face_frac", 0.0) / 0.03) * (1.0 - sidebar)
 
     scores = {
-        "talking-head": (_clamp(g("face_frac", 0.0) / 0.03) * (1.0 - 0.6 * text_amt)) if has_face else 0.0,
+        "talking-head": face_w * (1.0 - 0.6 * text_amt) if has_face else 0.0,
         # Dark + monospace text; prompts are the strongest signal. A dark editor
         # full of code tokens but no prompts should lose to "code".
         "terminal": _clamp(dark / 0.55) * _clamp(n_lines / 4.0) * (0.35 + 0.65 * max(0.6 * mono, prompt_r)) * (1.0 - 0.5 * code_r * (1.0 - prompt_r)),
         "code": _clamp(n_lines / 6.0) * max(mono * indent, code_r) * (1.0 - 0.5 * prompt_r),
-        "slide": text_amt * (1.0 - _clamp(dark / 0.6)) * (1.0 - 0.6 * max(mono, code_r)) * (1.0 - 0.5 * _clamp(g("face_frac", 0.0) / 0.03)),
+        # A shared screen next to a webcam strip is presentation content even when
+        # it has little OCR text (title or picture-only slides). Code/terminal still
+        # win on their own signals; a diagram or whiteboard beside the strip may be
+        # called "slide", which is still kept by the default --drop.
+        "slide": max(
+            text_amt * (1.0 - _clamp(dark / 0.6)) * (1.0 - 0.6 * max(mono, code_r)) * (1.0 - 0.5 * face_w),
+            0.5 * sidebar * (1.0 - max(mono, code_r, prompt_r)),
+        ),
         "diagram": (0.6 * _clamp(g("n_rects", 0.0) / 4.0) + 0.4 * _clamp(g("n_hough_lines", 0.0) / 20.0)) * (1.0 - 0.5 * text_amt),
         # Bright, unsaturated, some strokes but little OCR-able text and no boxes.
         "whiteboard": _clamp(light / 0.7) * (1.0 - _clamp(g("mean_sat", 0.0) / 60.0)) * _clamp((g("edge_density", 0.0) - 0.015) / 0.03) * (1.0 - text_amt) * (1.0 - _clamp(g("n_rects", 0.0) / 3.0)),

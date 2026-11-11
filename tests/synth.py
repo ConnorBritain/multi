@@ -5,7 +5,7 @@ import glob
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 W, H = 640, 360
 
@@ -112,6 +112,48 @@ def moved_rectangle(shift: int = 0) -> Image.Image:
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
     d.rectangle((100 + shift, 100, 180 + shift, 160), fill="red")
+    return img
+
+
+def _face(size: int) -> Image.Image:
+    """Grayscale cartoon face that OpenCV's frontal Haar cascade detects."""
+    s = size
+    img = Image.new("L", (s, s), 90)
+    d = ImageDraw.Draw(img)
+    d.ellipse((s * .15, s * .05, s * .85, s * .98), fill=200)  # head
+    d.rectangle((s * .25, s * .30, s * .45, s * .36), fill=40)  # brows
+    d.rectangle((s * .55, s * .30, s * .75, s * .36), fill=40)
+    d.ellipse((s * .28, s * .40, s * .42, s * .48), fill=30)  # eyes
+    d.ellipse((s * .58, s * .40, s * .72, s * .48), fill=30)
+    d.rectangle((s * .46, s * .42, s * .54, s * .66), fill=225)  # nose bridge
+    d.ellipse((s * .40, s * .64, s * .60, s * .70), fill=120)  # nostrils
+    d.rectangle((s * .35, s * .76, s * .65, s * .81), fill=70)  # mouth
+    return img.filter(ImageFilter.GaussianBlur(s / 60)).convert("RGB")
+
+
+def _tile(w: int, h: int, face: int) -> Image.Image:
+    tile = Image.new("RGB", (w, h), (90, 90, 90))
+    tile.paste(_face(face), ((w - face) // 2, (h - face) // 2))
+    return tile
+
+
+def video_call_slide() -> Image.Image:
+    """Zoom-style shared screen: three webcam tiles stacked in a narrow left strip
+    (x 0-235 of 1280x720), a title-only slide filling the rest."""
+    img = Image.new("RGB", (1280, 720), (24, 24, 24))
+    for i in range(3):
+        img.paste(_tile(235, 132, 100), (0, 160 + i * 136))
+    d = ImageDraw.Draw(img)
+    d.rectangle((245, 72, 1270, 648), fill="white")
+    d.text((300, 320), "II - WHAT MAKES NEWSLETTERS MAGNETIC", fill="black", font=_font(False, 40))
+    return img
+
+
+def gallery() -> Image.Image:
+    """Zoom-style gallery view: three large webcam tiles side by side, no shared screen."""
+    img = Image.new("RGB", (1280, 720), (24, 24, 24))
+    for i in range(3):
+        img.paste(_tile(416, 300, 220), (8 + i * 424, 210))
     return img
 
 

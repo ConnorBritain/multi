@@ -57,6 +57,34 @@ def test_pip_face_over_dense_slide_prefers_slide() -> None:
     assert kind == "slide"
 
 
+def test_faces_confined_to_edge_strip_prefer_slide() -> None:
+    # Webcam tiles in a narrow side strip next to a shared screen must not make a
+    # sparse title slide "talking-head", or the default --drop deletes real slides.
+    kind, _ = classify_features(feats(n_faces=3, face_frac=0.012, face_strip_frac=0.2, n_lines=1, n_chars=36, dark_frac=0.27, light_frac=0.6))
+    assert kind == "slide"
+
+
+def test_mid_size_webcam_tile_beside_blank_slide_prefers_slide() -> None:
+    # A larger webcam panel (160px face at x=80 of 1280x720) next to a blank or title
+    # slide must not tip the frame to talking-head, or --drop deletes the slide.
+    kind, _ = classify_features(feats(n_faces=1, face_frac=0.028, face_strip_frac=0.3125))
+    assert kind == "slide"
+
+
+def test_large_face_near_edge_stays_talking_head() -> None:
+    # A presenter framed off to one side is still a talking head; treating every
+    # edge face as a webcam strip would stop --drop from removing them.
+    kind, _ = classify_features(feats(n_faces=1, face_frac=0.06, face_strip_frac=0.3, light_frac=0.2, mean_sat=90))
+    assert kind == "talking-head"
+
+
+def test_face_just_past_webcam_size_cutoff_stays_talking_head() -> None:
+    # Pins the face-size cutoff: if it drifts up, edge-framed presenters stop being
+    # dropped by default and flood the output.
+    kind, _ = classify_features(feats(n_faces=1, face_frac=0.05, face_strip_frac=0.3, light_frac=0.2, mean_sat=90))
+    assert kind == "talking-head"
+
+
 def test_text_features() -> None:
     tf = text_features(["$ ls -la", "total 12", "def main():", "    return 0"])
     assert tf["prompt_ratio"] == pytest.approx(0.25)
@@ -84,6 +112,24 @@ def test_image_features_diagram_has_boxes_and_lines() -> None:
     f = image_features(synth.to_bgr(synth.diagram()))
     assert f["n_rects"] >= 4
     assert f["n_hough_lines"] >= 8
+
+
+def test_video_call_slide_with_webcam_strip_is_not_talking_head(tmp_path: Path) -> None:
+    # Zoom shares put small webcam tiles beside the slide; if the face detector wins,
+    # the default --drop talking-head deletes the slide.
+    s = _scene_for(synth.video_call_slide(), tmp_path, "call")
+    classify_scene(s)
+    assert s.features["n_faces"] >= 1  # the fixture really does trigger face detection
+    assert s.kind == "slide", (s.kind, s.kind_confidence, s.features)
+
+
+def test_gallery_view_stays_talking_head(tmp_path: Path) -> None:
+    # A gallery of large webcam tiles has no shared content; it must still be dropped
+    # by default, or every gallery frame floods the output.
+    s = _scene_for(synth.gallery(), tmp_path, "gallery")
+    classify_scene(s)
+    assert s.features["n_faces"] >= 2
+    assert s.kind == "talking-head", (s.kind, s.kind_confidence, s.features)
 
 
 @pytest.mark.skipif(not tesseract_available(), reason="tesseract not installed")

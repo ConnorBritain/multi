@@ -64,10 +64,24 @@ def test_faces_confined_to_edge_strip_prefer_slide() -> None:
     assert kind == "slide"
 
 
+def test_mid_size_webcam_tile_beside_blank_slide_prefers_slide() -> None:
+    # A larger webcam panel (160px face at x=80 of 1280x720) next to a blank or title
+    # slide must not tip the frame to talking-head, or --drop deletes the slide.
+    kind, _ = classify_features(feats(n_faces=1, face_frac=0.028, face_strip_frac=0.3125))
+    assert kind == "slide"
+
+
 def test_large_face_near_edge_stays_talking_head() -> None:
     # A presenter framed off to one side is still a talking head; treating every
     # edge face as a webcam strip would stop --drop from removing them.
     kind, _ = classify_features(feats(n_faces=1, face_frac=0.06, face_strip_frac=0.3, light_frac=0.2, mean_sat=90))
+    assert kind == "talking-head"
+
+
+def test_face_just_past_webcam_size_cutoff_stays_talking_head() -> None:
+    # Pins the face-size cutoff: if it drifts up, edge-framed presenters stop being
+    # dropped by default and flood the output.
+    kind, _ = classify_features(feats(n_faces=1, face_frac=0.05, face_strip_frac=0.3, light_frac=0.2, mean_sat=90))
     assert kind == "talking-head"
 
 

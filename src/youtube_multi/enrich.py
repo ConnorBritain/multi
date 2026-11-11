@@ -322,10 +322,12 @@ def classify_features(f: dict[str, float]) -> tuple[str, float]:
     has_face = g("n_faces", 0.0) >= 1
     # Small faces packed into a band along one edge are webcam tiles beside a
     # shared screen: the screen, not the faces, is the frame's content. Ramps from
-    # 0 at a 40%-deep band to 1 at 25%; large faces (a real presenter framed off
-    # to one side) never count, whatever their position.
-    small_faces = 1.0 - _clamp((g("face_frac", 0.0) - 0.02) / 0.02)
-    sidebar = _clamp((0.4 - g("face_strip_frac", 1.0)) / 0.15) * small_faces if has_face else 0.0
+    # 0 at a 45%-deep band to 1 at 30%; faces over 4.5% of the frame (a real
+    # presenter framed off to one side) never count, whatever their position.
+    # Faces up to 3% count fully, so mid-size webcam panels are not split between
+    # talking-head and slide (where talking-head would win and get dropped).
+    small_faces = 1.0 - _clamp((g("face_frac", 0.0) - 0.03) / 0.015)
+    sidebar = _clamp((0.45 - g("face_strip_frac", 1.0)) / 0.15) * small_faces if has_face else 0.0
     face_w = _clamp(g("face_frac", 0.0) / 0.03) * (1.0 - sidebar)
 
     scores = {
